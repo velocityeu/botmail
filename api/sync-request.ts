@@ -6,7 +6,7 @@
 //                                                                       -> CoS claims / completes the request
 //
 // Pressing Sync while a request is already pending/running does not create a new one; it bumps `presses`.
-// A running request older than STALE_MS is treated as abandoned and a new press re-opens it as pending.
+// A pending/running request older than STALE_MS is treated as abandoned and a new press re-opens it as pending.
 import { randomUUID } from 'node:crypto'
 import { auth, err, json } from './_lib/http.js'
 import { isSyncPending, readSyncRequest, readThreads, writeSyncRequest } from './_lib/store.js'
@@ -41,7 +41,8 @@ export async function POST(req: Request) {
 
   // App (or CoS) pressing the button: open a request.
   if (!status || status === 'pending') {
-    const stale = cur.status === 'running' && Date.now() - Date.parse(cur.startedAt || cur.requestedAt || now) > STALE_MS
+    // A pending or running request untouched for STALE_MS is abandoned: a new press re-opens a fresh one.
+    const stale = isSyncPending(cur) && Date.now() - Date.parse(cur.startedAt || cur.requestedAt || now) > STALE_MS
     if (isSyncPending(cur) && !stale) {
       const next: SyncRequest = { ...cur, presses: (cur.presses || 1) + 1 }
       await writeSyncRequest(next)

@@ -21,11 +21,17 @@ export const setDemoMode = (on: boolean) => on ? ls.set(K_MODE, 'demo') : ls.del
 /* ---------------- API client ---------------- */
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message) } }
 
+// Every API call has a hard timeout so no busy state (Requesting…, Connecting…, Syncing…) can hang on a stalled request.
+const API_TIMEOUT_MS = 15_000
 async function api<T>(path: string, init: RequestInit = {}, key = getKey()): Promise<T> {
-  const r = await fetch(path, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${key ?? ''}`, ...(init.headers || {}) } })
-  const j = await r.json().catch(() => ({}))
-  if (!r.ok) throw new ApiError(r.status, (j as { error?: string }).error || `HTTP ${r.status}`)
-  return j as T
+  const ac = new AbortController()
+  const t = setTimeout(() => ac.abort(), API_TIMEOUT_MS)
+  try {
+    const r = await fetch(path, { ...init, signal: ac.signal, cache: 'no-store', headers: { 'content-type': 'application/json', authorization: `Bearer ${key ?? ''}`, ...(init.headers || {}) } })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) throw new ApiError(r.status, (j as { error?: string }).error || `HTTP ${r.status}`)
+    return j as T
+  } finally { clearTimeout(t) }
 }
 
 export async function fetchLive(key?: string) {

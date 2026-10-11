@@ -65,7 +65,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [railOpen, setRailOpen] = useState(false)
   const [syncReq, setSyncReq] = useState<SyncRequest | null>(null)
-    const [requesting, setRequesting] = useState(false)
+  const [requesting, setRequesting] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   const live = mode === 'live'
 
@@ -150,13 +150,20 @@ export default function App() {
     } catch (e) { setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error') }
     finally { setRequesting(false) }
   }
+  // Clear the 'Requested · tap Reload' state as soon as any poll shows the request finished or fresh mail landed.
+  const timeoutAt = useRef<string | null>(null)
+  useEffect(() => {
+    if (syncPhase !== 'timeout') { timeoutAt.current = null; return }
+    if (timeoutAt.current === null) { timeoutAt.current = syncedAt ?? ''; return }
+    if (syncReq?.status === 'done' || syncReq?.status === 'failed' || (syncedAt ?? '') !== timeoutAt.current) setSyncPhase('idle')
+  }, [syncPhase, syncedAt, syncReq])
   const reload = () => { setSyncPhase('idle'); refresh() }
   const syncBusy = requesting || syncPhase === 'watching'
   const syncLine = requesting ? 'Requesting…'
     : syncPhase === 'watching' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing' : 'Waiting for Grok Bot')
     : syncPhase === 'timeout' ? 'Requested · tap Reload'
     : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
-    : syncedAt ? `Last synced ${ago(syncedAt)}` : 'Idle · awaiting first sync'
+    : syncedAt ? `Last synced ${ago(syncedAt)}${syncReq && (syncReq.status === 'pending' || syncReq.status === 'running') ? ' · sync requested' : ''}` : 'Idle · awaiting first sync'
   const syncTitle = syncBusy ? 'Sync requested; Grok Bot syncs mail and sends queued replies' : 'Ask Grok Bot to sync mail and send queued replies now'
 
   useEffect(() => { if (wide && !selId && threads[0]) setSelId(threads.find(t => t.folder === 'inbox')?.id ?? null) }, [threads.length]) // eslint-disable-line react-hooks/exhaustive-deps
