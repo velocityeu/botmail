@@ -65,8 +65,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [railOpen, setRailOpen] = useState(false)
   const [syncReq, setSyncReq] = useState<SyncRequest | null>(null)
-  const [watchUntil, setWatchUntil] = useState(0)
-  const [requesting, setRequesting] = useState(false)
+    const [requesting, setRequesting] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   const live = mode === 'live'
 
@@ -97,44 +96,65 @@ export default function App() {
     document.addEventListener('visibilitychange', tick)
     return () => { clearInterval(i); document.removeEventListener('visibilitychange', tick) }
   }, [live, refresh])
-  // Sync button: after a press, poll the request every 4 s for ~2 min; reload mail when CoS reports done
-  // (or when a fresh syncedAt lands), then fall back to the normal 45 s poll.
-  const syncedAtRef = useRef(syncedAt); syncedAtRef.current = syncedAt
+  // Sync button. The spinner is driven ONLY by local state for the current press (syncPhase), never by
+  // the server's request status seen on a background poll, so it can never spin indefinitely.
+  // After POST /api/sync-request we poll GET /api/sync-request every 3 s and stop as soon as the request
+  // is done/failed, or the first successful poll reports pending=false, or a fresh syncedAt lands; then
+  // reload threads. A hard 90 s timeout always stops the spinner and shows "Requested · tap Reload".
+  const SYNC_POLL_MS = 3000, SYNC_TIMEOUT_MS = 90_000
+  const [syncPhase, setSyncPhase] = useState<'idle' | 'watching' | 'timeout'>('idle')
+  const [syncWatch, setSyncWatch] = useState<{ n: number; id: string | null; syncedAt: string | null } | null>(null)
   useEffect(() => {
-    if (!live || !watchUntil) return
-    let stop = false
-    const tick = async () => {
+    if (!live || !syncWatch) return
+    let stop = false, inFlight = false
+    const finish = (toast?: string) => {
       if (stop) return
-      if (Date.now() > watchUntil) { setWatchUntil(0); refresh(undefined, true); return }
+      stop = true; clearInterval(i); clearTimeout(t)
+      setSyncPhase('idle'); setSyncWatch(null)
+      if (toast) setToast(toast)
+      refresh(undefined, true)
+    }
+    const tick = async () => {
+      if (stop || inFlight) return
+      inFlight = true
       try {
         const r = await fetchSyncRequest()
         if (stop) return
         setSyncReq(r.request)
-        if (r.syncedAt && r.syncedAt !== syncedAtRef.current) refresh(undefined, true)
-        if (!r.pending) {
-          setWatchUntil(0); refresh(undefined, true)
-          if (r.request.status === 'done') setToast('Synced')
-          else if (r.request.status === 'failed') setToast(`Sync failed${r.request.error ? ' · ' + r.request.error : ''}`)
-        }
-      } catch { /* keep polling */ }
+        const st = r.request.status
+        const fresh = !!r.syncedAt && r.syncedAt !== syncWatch.syncedAt
+        if (st === 'done' || (fresh && st !== 'failed')) finish('Synced')
+        else if (st === 'failed') finish(`Sync failed${r.request.error ? ' · ' + r.request.error : ''}`)
+        else if (!r.pending) finish()
+      } catch { /* keep polling until the hard timeout */ }
+      finally { inFlight = false }
     }
-    const i = setInterval(tick, 4000)
-    return () => { stop = true; clearInterval(i) }
-  }, [live, watchUntil, refresh])
+    const i = setInterval(tick, SYNC_POLL_MS)
+    const t = setTimeout(() => {
+      if (stop) return
+      stop = true; clearInterval(i)
+      setSyncPhase('timeout'); setSyncWatch(null)
+    }, SYNC_TIMEOUT_MS)
+    tick()
+    return () => { stop = true; clearInterval(i); clearTimeout(t) }
+  }, [live, syncWatch, refresh])
   const doSync = async () => {
-    if (!live || requesting) return
+    if (!live || requesting || syncPhase === 'watching') return
     setRequesting(true)
     try {
       const r = await requestSync()
-      setSyncReq(r.request); setWatchUntil(Date.now() + 120_000)
+      setSyncReq(r.request)
+      setSyncPhase('watching')
+      setSyncWatch({ n: Date.now(), id: r.request.id, syncedAt: r.syncedAt })
       setToast('Sync requested · Grok Bot will pick it up')
     } catch (e) { setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error') }
     finally { setRequesting(false) }
   }
-  const syncBusy = requesting || syncReq?.status === 'pending' || syncReq?.status === 'running'
+  const reload = () => { setSyncPhase('idle'); refresh() }
+  const syncBusy = requesting || syncPhase === 'watching'
   const syncLine = requesting ? 'Requesting…'
-    : syncReq?.status === 'running' ? 'Grok Bot is syncing'
-    : syncReq?.status === 'pending' ? (watchUntil ? 'Waiting for Grok Bot' : `Requested ${ago(syncReq.requestedAt!)} · waiting for Grok Bot`)
+    : syncPhase === 'watching' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing' : 'Waiting for Grok Bot')
+    : syncPhase === 'timeout' ? 'Requested · tap Reload'
     : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
     : syncedAt ? `Last synced ${ago(syncedAt)}` : 'Idle · awaiting first sync'
   const syncTitle = syncBusy ? 'Sync requested; Grok Bot syncs mail and sends queued replies' : 'Ask Grok Bot to sync mail and send queued replies now'
@@ -258,12 +278,12 @@ export default function App() {
       <div className="acct"><Coin coin="brass" initials="AT" size={34} /><div style={{ minWidth: 0 }}><b>{ME.name}</b><small className="trunc"><i />{ME.addr}</small></div></div>
       {live ? <div className="demo live">
           <div className="syncbox">
-            <button className={`syncb steel ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={requesting} title={syncTitle} aria-live="polite">
+            <button className={`syncb steel ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={syncBusy} title={syncTitle} aria-live="polite">
               <span className="rv" /><Icon n="sync" s={15} w={2.4} /><b>{syncBusy ? 'Syncing…' : 'Sync'}</b><span className="rv" /></button>
             <span className="ls"><i className={syncBusy || refreshing ? 'spin' : ''} />{syncLine}</span>
           </div>
           {queuedCount > 0 && <span className="lq">{queuedCount} waiting to send</span>}
-          <span><button onClick={() => refresh()}>Reload</button> · <button onClick={leave}>Disconnect</button></span>
+          <span><button onClick={reload}>Reload</button> · <button onClick={leave}>Disconnect</button></span>
         </div>
         : <div className="demo">Sample data · <button onClick={doResetDemo}>Reset</button> · <button onClick={leave}>Connect</button></div>}
     </aside>
@@ -276,7 +296,7 @@ export default function App() {
           <div className="lt">
             {!wide && <button className="knob steel" onClick={() => setRailOpen(true)} aria-label="Mailboxes"><Icon n="sidebar" s={15} /></button>}
             <h1>{title}</h1>{!label && folder === 'inbox' && unreadCount > 0 && <span className="plate brass n">{unreadCount} NEW</span>}
-            {!wide && live && <button className={`knob steel synck ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={requesting} title={`${syncTitle} · ${syncLine}`} aria-label={syncBusy ? 'Syncing' : 'Sync'}><Icon n="sync" s={15} w={2.4} /></button>}
+            {!wide && live && <button className={`knob steel synck ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={syncBusy} title={`${syncTitle} · ${syncLine}`} aria-label={syncBusy ? 'Syncing' : 'Sync'}><Icon n="sync" s={15} w={2.4} /></button>}
             {wide ? <div className="seg">{(['all', 'unread', 'bots'] as Seg[]).map(s => <button key={s} className={seg === s ? 'on brass' : ''} onClick={() => setSeg(s)}>{s === 'all' ? 'All' : s === 'unread' ? 'Unread' : 'Bots'}</button>)}</div>
               : <button className="compose-pill brass" onClick={() => setComposing(true)}><Icon n="compose" s={15} />Compose</button>}
           </div>
