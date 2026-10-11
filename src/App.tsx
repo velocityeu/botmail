@@ -145,7 +145,7 @@ export default function App() {
   const reload = () => { refresh().then(ok => setToast(ok ? 'Reloaded' : 'Reload failed · could not reach the mail API')) }
   const syncBusy = requesting || syncPhase === 'waking'
   const syncLine = syncPhase === 'waking' ? 'Waking Grok Bot…'
-    : syncPhase === 'requested' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing · tap Reload'
+    : syncPhase === 'requested' ? (syncReq?.status === 'running' && syncReq.pulledAt ? 'Grok Bot pulled mail · tap Reload'
       : wake === 'woken' ? 'Grok Bot woken · tap Reload'
       : 'Requested · tap Reload')
     : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
