@@ -1,0 +1,273 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ME, type Folder, type Label, type Message, type Thread } from './data'
+import { loadThreads, resetLocal, saveLocal } from './mailSource'
+import { Icon } from './icons'
+
+const FOLDERS: { id: Folder; name: string; icon: string }[] = [
+  { id: 'inbox', name: 'Inbox', icon: 'inbox' },
+  { id: 'starred', name: 'Starred', icon: 'star' },
+  { id: 'sent', name: 'Sent', icon: 'sent' },
+  { id: 'drafts', name: 'Drafts', icon: 'drafts' },
+  { id: 'archive', name: 'Archive', icon: 'archive' },
+  { id: 'trash', name: 'Trash', icon: 'trash' },
+]
+const LABELS: { id: Label; name: string; cls: string }[] = [
+  { id: 'bots', name: 'Bots', cls: 'sw-patina' },
+  { id: 'field', name: 'Field ops', cls: 'sw-bronze' },
+  { id: 'builds', name: 'Builds', cls: 'sw-steel' },
+  { id: 'calendar', name: 'Calendar', cls: 'sw-brass' },
+]
+type Seg = 'all' | 'unread' | 'bots'
+
+const nowHM = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })
+const nowLong = () => new Date().toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' }).replace(',', ' ·')
+
+function useClock(fmt: () => string) {
+  const [t, setT] = useState(fmt)
+  useEffect(() => { const i = setInterval(() => setT(fmt()), 15000); return () => clearInterval(i) }, [fmt])
+  return t
+}
+function useWide() {
+  const q = '(min-width: 900px)'
+  const [w, setW] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches)
+  useEffect(() => { const m = window.matchMedia(q); const f = () => setW(m.matches); m.addEventListener('change', f); return () => m.removeEventListener('change', f) }, [])
+  return w
+}
+
+function Coin({ coin, initials, size = 34 }: { coin: string; initials: string; size?: number }) {
+  return <div className={`av c-${coin}`} style={{ width: size, height: size, fontSize: size * 0.37 }}>{initials}</div>
+}
+
+export default function App() {
+  const wide = useWide()
+  const longClock = useClock(nowLong)
+  const [threads, setThreads] = useState<Thread[]>([])
+  const [source, setSource] = useState<'api' | 'sample'>('sample')
+  const [folder, setFolder] = useState<Folder>('inbox')
+  const [label, setLabel] = useState<Label | null>(null)
+  const [seg, setSeg] = useState<Seg>('all')
+  const [q, setQ] = useState('')
+  const [selId, setSelId] = useState<string | null>(null)
+  const [mobileView, setMobileView] = useState<'list' | 'thread'>('list')
+  const [composing, setComposing] = useState(false)
+  const [reply, setReply] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
+  const [railOpen, setRailOpen] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { loadThreads().then(({ threads, source }) => {
+    setThreads(threads); setSource(source)
+    if (window.matchMedia('(min-width: 900px)').matches && threads[0]) setSelId(threads[0].id)
+  }) }, [])
+  useEffect(() => { if (threads.length) saveLocal(threads) }, [threads])
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 2600); return () => clearTimeout(t) }, [toast])
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); searchRef.current?.focus() }
+      if (e.key === 'Escape') { setComposing(false); setRailOpen(false) }
+    }
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k)
+  }, [])
+
+  const inFolder = (t: Thread, f: Folder) => f === 'starred' ? !!t.starred && t.folder !== 'trash' : t.folder === f
+  const visible = useMemo(() => threads.filter(t => {
+    if (label ? !(t.labels.includes(label) && t.folder !== 'trash') : !inFolder(t, folder)) return false
+    if (seg === 'unread' && !t.unread) return false
+    if (seg === 'bots' && !t.bot) return false
+    if (q) {
+      const hay = (t.subject + ' ' + t.participants + ' ' + t.messages.map(m => m.body).join(' ')).toLowerCase()
+      if (!hay.includes(q.toLowerCase())) return false
+    }
+    return true
+  }), [threads, folder, label, seg, q])
+  const sel = threads.find(t => t.id === selId) || null
+  const unreadCount = threads.filter(t => t.folder === 'inbox' && t.unread).length
+  const count = (f: Folder) => f === 'inbox' ? unreadCount : f === 'drafts' ? threads.filter(t => t.folder === 'drafts').length : 0
+
+  const update = (id: string, fn: (t: Thread) => Thread) => setThreads(ts => ts.map(t => t.id === id ? fn(t) : t))
+  const open = (t: Thread) => { setSelId(t.id); update(t.id, x => ({ ...x, unread: false })); setMobileView('thread'); setReply('') }
+  const goFolder = (f: Folder) => { setFolder(f); setLabel(null); setRailOpen(false); setMobileView('list') }
+  const goLabel = (l: Label) => { setLabel(l); setRailOpen(false); setMobileView('list') }
+  const moveSel = (f: Folder, msg: string) => {
+    if (!sel) return
+    update(sel.id, t => ({ ...t, folder: f })); setToast(msg)
+    const next = visible.find(t => t.id !== sel.id)
+    setSelId(wide && next ? next.id : null); setMobileView('list')
+  }
+  const sendReply = (text?: string) => {
+    const body = (text ?? reply).trim()
+    if (!sel || !body) return
+    const last = [...sel.messages].reverse().find(m => m.fromAddr !== ME.addr)
+    const m: Message = { id: 'r' + Date.now(), from: ME.name, fromAddr: ME.addr, to: last?.from ?? sel.participants, time: nowHM(), coin: 'brass', initials: ME.initials, body }
+    update(sel.id, t => ({ ...t, messages: [...t.messages, m], time: m.time, day: 'today' }))
+    setReply(''); setToast('Reply saved in demo · not delivered')
+  }
+  const sendNew = (to: string, subject: string, body: string) => {
+    const t: Thread = { id: 'n' + Date.now(), subject: subject || '(no subject)', participants: to || '(no recipient)', folder: 'sent', labels: [],
+      unread: false, day: 'today', time: nowHM(), coin: 'brass', initials: ME.initials,
+      messages: [{ id: 'nm' + Date.now(), from: ME.name, fromAddr: ME.addr, to: to, time: nowHM(), coin: 'brass', initials: ME.initials, body }] }
+    setThreads(ts => [t, ...ts]); setComposing(false); setToast('Saved to Sent in demo · not delivered')
+  }
+  const resetDemo = () => { resetLocal(); location.reload() }
+  const title = label ? LABELS.find(l => l.id === label)!.name : FOLDERS.find(f => f.id === folder)!.name
+  const replyTo = sel ? ([...sel.messages].reverse().find(m => m.fromAddr !== ME.addr)?.from ?? sel.participants) : ''
+
+  /* ---------- pieces ---------- */
+  const rail = (
+    <aside className={`rail ${railOpen ? 'open' : ''}`} aria-label="Mailboxes">
+      <div className="brand"><div className="medal">G</div><div><b className="goldtxt">Grok Bot Mail</b><small>EST. MMXXVI</small></div>
+        {!wide && <button className="knob steel close" onClick={() => setRailOpen(false)} aria-label="Close"><Icon n="x" s={14} /></button>}</div>
+      <button className="compose-wide brass" onClick={() => { setComposing(true); setRailOpen(false) }}><Icon n="compose" s={16} />Compose</button>
+      <nav className="nav">
+        {FOLDERS.map(f => (
+          <button key={f.id} className={`ni ${!label && folder === f.id ? 'on brass' : ''}`} onClick={() => goFolder(f.id)}>
+            <Icon n={f.icon} s={16} />{f.name}{count(f.id) > 0 && <span className="c">{count(f.id)}</span>}
+          </button>))}
+      </nav>
+      <div className="sec">LABELS</div>
+      <nav className="nav">
+        {LABELS.map(l => (
+          <button key={l.id} className={`ni ${label === l.id ? 'on brass' : ''}`} onClick={() => goLabel(l.id)}>
+            <span className={`lb ${l.cls}`} />{l.name}
+          </button>))}
+      </nav>
+      <div className="acct"><Coin coin="brass" initials="AT" size={34} /><div style={{ minWidth: 0 }}><b>{ME.name}</b><small className="trunc"><i />{ME.addr}</small></div></div>
+      <div className="demo">{source === 'sample' ? <>Sample data · v1 <button onClick={resetDemo}>Reset</button></> : 'Live API'}</div>
+    </aside>
+  )
+
+  const list = (
+    <section className="lbz bezel" aria-label={title}>
+      <div className="list parch">
+        <div className="lhead">
+          <div className="lt">
+            {!wide && <button className="knob steel" onClick={() => setRailOpen(true)} aria-label="Mailboxes"><Icon n="sidebar" s={15} /></button>}
+            <h1>{title}</h1>{!label && folder === 'inbox' && unreadCount > 0 && <span className="plate brass n">{unreadCount} NEW</span>}
+            {wide ? <div className="seg">{(['all', 'unread', 'bots'] as Seg[]).map(s => <button key={s} className={seg === s ? 'on brass' : ''} onClick={() => setSeg(s)}>{s === 'all' ? 'All' : s === 'unread' ? 'Unread' : 'Bots'}</button>)}</div>
+              : <button className="compose-pill brass" onClick={() => setComposing(true)}><Icon n="compose" s={15} />Compose</button>}
+          </div>
+          <label className="search"><Icon n="search" s={15} c="#9A876E" w={2.4} />
+            <input ref={searchRef} value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail" aria-label="Search mail" />
+            {wide && <kbd>⌘K</kbd>}</label>
+          {!wide && <div className="seg mseg">{(['all', 'unread', 'bots'] as Seg[]).map(s => <button key={s} className={seg === s ? 'on brass' : ''} onClick={() => setSeg(s)}>{s === 'all' ? 'All' : s === 'unread' ? `Unread${unreadCount ? ' ' + unreadCount : ''}` : 'Bots'}</button>)}</div>}
+        </div>
+        <div className="rows">
+          {visible.length === 0 && <div className="empty"><div className="medal sm">∅</div>Nothing here{q ? ` for “${q}”` : ''}.</div>}
+          {(['today', 'earlier'] as const).map(day => {
+            const rows = visible.filter(t => t.day === day)
+            if (!rows.length) return null
+            return <div key={day}>
+              <div className="day">{day.toUpperCase()}</div>
+              {rows.map(t => {
+                const last = t.messages[t.messages.length - 1]
+                return <button key={t.id} className={`row ${t.unread ? '' : 'read'} ${t.id === selId && (wide || mobileView === 'thread') ? 'sel' : ''}`} onClick={() => open(t)}>
+                  <div className="lead">{t.unread && <span className="rivet" aria-label="unread" />}</div>
+                  <Coin coin={t.coin} initials={t.initials} size={36} />
+                  <div className="b">
+                    <div className="l1"><span className="from trunc">{t.participants}{t.messages.length > 1 && <span className="cnt"> {t.messages.length}</span>}</span>
+                      {t.bot && <span className="tag">BOT</span>}{t.starred && <span className="st">★</span>}<span className="time">{t.time}</span></div>
+                    <div className="s trunc">{t.subject}</div>
+                    <div className="p">{last.body}</div>
+                    {t.labels.filter(l => l !== 'bots').length > 0 && <div className="mini">{t.labels.filter(l => l !== 'bots').map(l => <span key={l} className={`mini-${l}`}>{LABELS.find(x => x.id === l)!.name.toUpperCase()}</span>)}</div>}
+                  </div>
+                </button>
+              })}
+            </div>
+          })}
+        </div>
+      </div>
+    </section>
+  )
+
+  const reader = sel ? (
+    <section className="rbz bezel" aria-label="Message">
+      <div className="reader">
+        <div className="rbar">
+          {!wide && <button className="chip act steel" onClick={() => setMobileView('list')}><Icon n="back" s={14} w={2.6} />{title}</button>}
+          {wide && <>
+            <button className="chip act steel" onClick={() => moveSel('archive', 'Archived')}><Icon n="archive" s={14} />Archive</button>
+            <button className="chip act steel" onClick={() => { update(sel.id, t => ({ ...t, unread: true })); setToast('Marked unread') }}><Icon n="unread" s={14} />Mark unread</button>
+            <button className="chip act steel" onClick={() => moveSel('inbox', 'Moved to Inbox')}><Icon n="inbox" s={14} />Move to Inbox</button>
+          </>}
+          <span className="flex" />
+          {!wide && <button className="knob steel" onClick={() => moveSel('archive', 'Archived')} aria-label="Archive"><Icon n="archive" s={14} /></button>}
+          <button className={`knob steel ${sel.starred ? 'lit' : ''}`} onClick={() => update(sel.id, t => ({ ...t, starred: !t.starred }))} aria-label="Star"><Icon n="star" s={14} /></button>
+          <button className="knob steel" onClick={() => moveSel('trash', 'Moved to Trash')} aria-label="Delete"><Icon n="trash" s={14} /></button>
+          {wide && <span className="clock">{longClock}</span>}
+        </div>
+        <div className="rscroll">
+          <div className="rsub"><h2>{sel.subject}</h2>
+            <div className="meta"><span className="plate brass">{sel.folder.toUpperCase()}</span>{sel.bot && <span className="plate patina">BOT REPLY</span>}<span className="plate outline">{sel.messages.length} MESSAGE{sel.messages.length > 1 ? 'S' : ''}</span></div></div>
+          <div className="msgs">
+            {sel.messages.map((m, i) => (
+              <article key={m.id} className="mbz bezel"><div className={`msg ${m.bot ? 'bot' : ''} ${m.fromAddr === ME.addr ? 'mine' : ''}`}>
+                <div className="mh"><Coin coin={m.coin} initials={m.initials} size={36} />
+                  <div style={{ minWidth: 0 }}><div className="who">{m.from}<small>{m.bot ? 'bot reply' : m.fromAddr}</small></div><div className="to trunc">to {m.to}</div></div>
+                  <div className="mt">{m.time}</div></div>
+                <div className="txt">{m.body.split('\n').map((line, k) => <p key={k}>{line || '\u00a0'}</p>)}</div>
+                {m.attachment && <button className="att" onClick={() => setToast('Sample attachment · no file in v1')}><i /><Icon n="file" s={15} c="#7A5C2E" />{m.attachment.name}<span>· {m.attachment.size}</span></button>}
+                {m.bot && i === sel.messages.length - 1 && <div className="quick">
+                  {['Thanks!', 'Sounds good'].map(x => <button key={x} className="chip" onClick={() => setReply(x)}>{x}</button>)}
+                  <button className="chip w" onClick={() => setToast('Summaries arrive with the live API')}>✦ Summarise</button></div>}
+              </div></article>))}
+          </div>
+        </div>
+        <form className="rpz bezel" onSubmit={e => { e.preventDefault(); sendReply() }}><div className="reply">
+          <div className="ta"><Icon n="reply" s={14} c="#B08D57" w={2.4} />Reply to <span className="chip patina">{replyTo}</span>{wide && <> from <b>{ME.addr}</b></>}</div>
+          <div className="rrow">
+            <button type="button" className="knob steel" aria-label="Attach" onClick={() => setToast('Attachments arrive with the live API')}><Icon n="attach" s={15} /></button>
+            <textarea value={reply} onChange={e => setReply(e.target.value)} placeholder={`Reply to ${replyTo}…`} rows={1}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendReply() } }} />
+            {wide && <button type="button" className="chip ai" onClick={() => setReply(r => r || 'Thanks — received loud and clear on my side too.')}><Icon n="spark" s={13} c="#D4AF37" />Draft with Grok Bot</button>}
+            <button type="submit" className={wide ? 'chip send brass' : 'sendknob brass'} disabled={!reply.trim()} aria-label="Send">{wide ? <><Icon n="sent" s={14} w={2.4} />Send</> : <Icon n="up" s={16} w={2.6} />}</button>
+          </div>
+        </div></form>
+      </div>
+    </section>
+  ) : (
+    <section className="rbz bezel"><div className="reader empty-reader"><div className="medal">G</div><p>Select a conversation</p><small>{ME.addr}</small></div></section>
+  )
+
+  return (
+    <div className={`app ${wide ? 'wide' : 'narrow'} view-${mobileView}`}>
+      <div className="bg" />
+      {wide && <div className="lights" aria-hidden><i /><i /><i /></div>}
+      {!wide && <div className="topline"><span className="acctline"><i />{ME.addr}</span></div>}
+      <div className="panes">
+        {(wide || railOpen) && rail}
+        {!wide && railOpen && <div className="scrim" onClick={() => setRailOpen(false)} />}
+        {(wide || mobileView === 'list') && list}
+        {(wide || mobileView === 'thread') && reader}
+      </div>
+      {composing && <Compose onClose={() => setComposing(false)} onSend={sendNew} wide={wide} />}
+      {toast && <div className="toast" role="status">{toast}</div>}
+    </div>
+  )
+}
+
+function Compose({ onClose, onSend, wide }: { onClose: () => void; onSend: (to: string, s: string, b: string) => void; wide: boolean }) {
+  const [to, setTo] = useState('')
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  return (
+    <div className="cwrap" onClick={onClose}>
+      <form className={`sheetb bezel ${wide ? 'win' : ''}`} onClick={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); onSend(to, subject, body) }}>
+        <div className="sheet parch">
+          {!wide && <div className="grab" />}
+          <div className="bar"><button type="button" className="x" onClick={onClose}>Cancel</button><h2>New message</h2>
+            <span className="sendw"><button type="submit" className="chip brass sendc" disabled={!to.trim() && !body.trim()}><Icon n="sent" s={14} w={2.4} />Send</button></span></div>
+          <div className="f"><span className="k">FROM</span><span className="chip lock"><Icon n="lock" s={12} c="#EAF3EC" w={2.6} />{ME.addr}</span></div>
+          <label className="f"><span className="k">TO</span><input value={to} onChange={e => setTo(e.target.value)} placeholder="name@example.com" autoFocus={wide} inputMode="email" /><span className="cc">Cc · Bcc</span></label>
+          <label className="f"><span className="k">SUBJECT</span><input value={subject} onChange={e => setSubject(e.target.value)} placeholder="Subject" style={{ fontWeight: 650 }} /></label>
+          <textarea className="cbody" value={body} onChange={e => setBody(e.target.value)} placeholder="Write your message…" />
+          <div className="sig">— Alexander · sent from Grok Bot Mail</div>
+          <div className="tb">
+            <span className="t steel"><Icon n="attach" s={16} /></span><span className="t steel"><Icon n="image" s={16} /></span><span className="t steel"><Icon n="bold" s={16} w={2.4} /></span>
+            <button type="button" className="chip polish brass" onClick={() => setBody(b => b ? b.trim() + '\n\nBest,\nAlexander' : 'Hi —\n\n')}><Icon n="spark" s={13} c="#3A2810" />Polish with Grok Bot</button>
+          </div>
+          <p className="note">v1 demo: Send saves to Sent on this device. No mail is delivered.</p>
+        </div>
+      </form>
+    </div>
+  )
+}
