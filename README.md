@@ -1,18 +1,32 @@
-# Bot Mail: Grok Bot inbox UI (v1)
+# Bot Mail
 
-A static Vite + React app for `alexandertr@mail.grokbot.com`, in the locked metal style (brass, steel, bronze, cream parchment, patina for bots only).
+Metal-style Grok Bot inbox UI — Vite + React + TypeScript.
 
-- **Data:** v1 uses sample threads baked into `src/data.ts`. Compose, reply, archive, star and delete all work locally and persist to `localStorage`. **Nothing is delivered**, and the UI says so. "Reset" in the sidebar restores the sample data.
-- **Wiring later:** set `VITE_MAIL_API` to a read endpoint that returns `{ threads: Thread[] }`. The `Thread` shape is in `src/data.ts`, and the loader is `src/mailSource.ts`. The client holds no keys. Put auth behind your own server or session.
-- **Responsive:**
-  - At 900px and wider: three panes (sidebar, list, reader).
-  - Below 900px: a single-pane phone flow with a drawer sidebar and a bottom-sheet compose. The phone layout respects iOS safe areas.
-  - The app can be installed as a PWA.
-- **Mock framing:** `?frame=ios` and `?frame=mac` are used only by the mock renderer.
+**Live:** https://botmail.velocitypulse.io
+
+## Status
+
+- **Web (this repo):** deployed and ready for verification at the live URL above.
+- **iOS / macOS native shells:** ON HOLD until the web app is verified.
+- **Data:** mock / sample threads only (`src/data.ts`). Compose, reply, archive, star, and delete work locally and persist to `localStorage`. **Nothing is delivered** — there is no mail API yet. "Reset" in the sidebar restores sample data.
+
+## Setup
 
 ```bash
 npm install
 npm run dev      # local
 npm run build    # -> dist/
 ```
-Deploy target: Vercel project `botmail`, domain `botmail.velocitypulse.io`.
+
+Optional later wiring: set `VITE_MAIL_API` to a read endpoint that returns `{ threads: Thread[] }`. The `Thread` shape is in `src/data.ts`; the loader is `src/mailSource.ts`. The client holds no keys — put auth behind your own server or session.
+
+## Layout
+
+- ≥900px: three panes (sidebar, list, reader)
+- &lt;900px: single-pane phone flow with drawer sidebar and bottom-sheet compose (iOS safe areas)
+- Installable as a PWA
+- `?frame=ios` / `?frame=mac` are mock-renderer helpers only
+
+## Deploy
+
+Vercel project `botmail`, domain `botmail.velocitypulse.io`.
