@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ME, type Folder, type Label, type Message, type Thread } from './data'
-import { loadThreads, resetLocal, saveLocal } from './mailSource'
+import type { ApiThread, OutboundItem, OutboundStatus } from '../shared/types'
+import {
+  ApiError, buildThreads, cancelSend, clearKey, fetchLive, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
+  queueSend, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
+} from './mailSource'
 import { Icon } from './icons'
 
 const FOLDERS: { id: Folder; name: string; icon: string }[] = [
@@ -41,8 +45,14 @@ function Coin({ coin, initials, size = 34 }: { coin: string; initials: string; s
 export default function App() {
   const wide = useWide()
   const longClock = useClock(nowLong)
-  const [threads, setThreads] = useState<Thread[]>([])
-  const [source, setSource] = useState<'api' | 'sample'>('sample')
+  const [mode, setMode] = useState<'loading' | 'connect' | 'live' | 'demo'>(() => getKey() ? 'loading' : getMode() === 'demo' ? 'demo' : 'connect')
+  const [demoThreads, setDemoThreads] = useState<Thread[]>(() => getMode() === 'demo' ? loadDemo() : [])
+  const [apiThreads, setApiThreads] = useState<ApiThread[]>([])
+  const [outbound, setOutbound] = useState<OutboundItem[]>([])
+  const [syncedAt, setSyncedAt] = useState<string | null>(null)
+  const [flags, setFlags] = useState<Flags>(loadFlags)
+  const [refreshing, setRefreshing] = useState(false)
+  const [connectErr, setConnectErr] = useState<string | null>(null)
   const [folder, setFolder] = useState<Folder>('inbox')
   const [label, setLabel] = useState<Label | null>(null)
   const [seg, setSeg] = useState<Seg>('all')
@@ -51,16 +61,43 @@ export default function App() {
   const [mobileView, setMobileView] = useState<'list' | 'thread'>('list')
   const [composing, setComposing] = useState(false)
   const [reply, setReply] = useState('')
+  const [sending, setSending] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [railOpen, setRailOpen] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  const live = mode === 'live'
 
-  useEffect(() => { loadThreads().then(({ threads, source }) => {
-    setThreads(threads); setSource(source)
-    if (window.matchMedia('(min-width: 900px)').matches && threads[0]) setSelId(threads[0].id)
-  }) }, [])
-  useEffect(() => { if (threads.length) saveLocal(threads) }, [threads])
-  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 2600); return () => clearTimeout(t) }, [toast])
+  const threads = useMemo(() => live ? buildThreads(apiThreads, outbound, flags) : demoThreads, [live, apiThreads, outbound, flags, demoThreads])
+
+  const refresh = useCallback(async (key?: string, quiet = false) => {
+    if (!quiet) setRefreshing(true)
+    try {
+      const d = await fetchLive(key)
+      if (key) setKey(key)
+      setApiThreads(d.threads); setOutbound(d.outbound); setSyncedAt(d.syncedAt)
+      setMode('live'); setDemoMode(false); setConnectErr(null)
+      return true
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 503)) {
+        clearKey(); setMode('connect')
+        setConnectErr(e.status === 401 ? 'That access key was not accepted.' : 'The server is not configured yet.')
+      } else if (key || !quiet) { setConnectErr('Could not reach the mail API. Check your connection.'); if (key) setMode('connect') }
+      return false
+    } finally { if (!quiet) setRefreshing(false) }
+  }, [])
+
+  useEffect(() => { if (mode === 'loading') refresh(undefined, true).then(ok => { if (!ok && getKey()) setMode('live') }) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { // poll while visible
+    if (!live) return
+    const tick = () => { if (document.visibilityState === 'visible') refresh(undefined, true) }
+    const i = setInterval(tick, 45000)
+    document.addEventListener('visibilitychange', tick)
+    return () => { clearInterval(i); document.removeEventListener('visibilitychange', tick) }
+  }, [live, refresh])
+  useEffect(() => { if (wide && !selId && threads[0]) setSelId(threads.find(t => t.folder === 'inbox')?.id ?? null) }, [threads.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (mode === 'demo' && demoThreads.length) saveDemo(demoThreads) }, [mode, demoThreads])
+  useEffect(() => { saveFlags(flags) }, [flags])
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 3200); return () => clearTimeout(t) }, [toast])
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); searchRef.current?.focus() }
@@ -75,42 +112,73 @@ export default function App() {
     if (seg === 'unread' && !t.unread) return false
     if (seg === 'bots' && !t.bot) return false
     if (q) {
-      const hay = (t.subject + ' ' + t.participants + ' ' + t.messages.map(m => m.body).join(' ')).toLowerCase()
+      const hay = (t.subject + ' ' + t.participants + ' ' + t.messages.map(m => m.from + ' ' + m.fromAddr + ' ' + m.body).join(' ')).toLowerCase()
       if (!hay.includes(q.toLowerCase())) return false
     }
     return true
   }), [threads, folder, label, seg, q])
   const sel = threads.find(t => t.id === selId) || null
   const unreadCount = threads.filter(t => t.folder === 'inbox' && t.unread).length
-  const count = (f: Folder) => f === 'inbox' ? unreadCount : f === 'drafts' ? threads.filter(t => t.folder === 'drafts').length : 0
+  const queuedCount = outbound.filter(o => o.status === 'queued' || o.status === 'sending').length
+  const count = (f: Folder) => f === 'inbox' ? unreadCount : f === 'drafts' ? threads.filter(t => t.folder === 'drafts').length : f === 'sent' && live ? queuedCount : 0
 
-  const update = (id: string, fn: (t: Thread) => Thread) => setThreads(ts => ts.map(t => t.id === id ? fn(t) : t))
-  const open = (t: Thread) => { setSelId(t.id); update(t.id, x => ({ ...x, unread: false })); setMobileView('thread'); setReply('') }
+  const update = (id: string, fn: (t: Thread) => Thread) => {
+    if (!live) return setDemoThreads(ts => ts.map(t => t.id === id ? fn(t) : t))
+    const prev = threads.find(t => t.id === id); if (!prev) return
+    setFlags(f => flagsFrom(prev, fn(prev), apiThreads.find(a => a.id === id), f))
+  }
+  const open = (t: Thread) => { setSelId(t.id); if (t.unread) update(t.id, x => ({ ...x, unread: false })); setMobileView('thread'); setReply('') }
   const goFolder = (f: Folder) => { setFolder(f); setLabel(null); setRailOpen(false); setMobileView('list') }
   const goLabel = (l: Label) => { setLabel(l); setRailOpen(false); setMobileView('list') }
   const moveSel = (f: Folder, msg: string) => {
     if (!sel) return
+    if (live && sel.id.startsWith('ob:')) return setToast('Not delivered yet · cancel it instead')
     update(sel.id, t => ({ ...t, folder: f })); setToast(msg)
     const next = visible.find(t => t.id !== sel.id)
     setSelId(wide && next ? next.id : null); setMobileView('list')
   }
-  const sendReply = (text?: string) => {
+  const lastInbound = (t: Thread) => [...t.messages].reverse().find(m => m.fromAddr !== ME.addr && !m.outboundId)
+  const sendReply = async (text?: string) => {
     const body = (text ?? reply).trim()
-    if (!sel || !body) return
-    const last = [...sel.messages].reverse().find(m => m.fromAddr !== ME.addr)
-    const m: Message = { id: 'r' + Date.now(), from: ME.name, fromAddr: ME.addr, to: last?.from ?? sel.participants, time: nowHM(), coin: 'brass', initials: ME.initials, body }
-    update(sel.id, t => ({ ...t, messages: [...t.messages, m], time: m.time, day: 'today' }))
-    setReply(''); setToast('Reply saved in demo · not delivered')
+    if (!sel || !body || sending) return
+    const last = lastInbound(sel)
+    if (!live) {
+      const m: Message = { id: 'r' + Date.now(), from: ME.name, fromAddr: ME.addr, to: last?.from ?? sel.participants, time: nowHM(), coin: 'brass', initials: ME.initials, body }
+      update(sel.id, t => ({ ...t, messages: [...t.messages, m], time: m.time, day: 'today' }))
+      setReply(''); return setToast('Demo · saved on this device, not delivered')
+    }
+    const real = [...sel.messages].reverse().find(m => !m.outboundId)
+    const to = last ? last.fromAddr : firstAddr(real?.to || '')
+    if (!to) return setToast('No recipient address on this thread')
+    setSending(true)
+    try {
+      const item = await queueSend({ to, subject: /^re:/i.test(sel.subject) ? sel.subject : 'Re: ' + sel.subject, body,
+        replyToMessageId: (last ?? real)?.id, threadId: sel.id.startsWith('ob:') ? undefined : sel.id })
+      setOutbound(o => [...o, item]); setReply(''); setToast('Queued · Grok Bot will deliver it')
+    } catch (e) { setToast(e instanceof ApiError ? `Not queued · ${e.message}` : 'Not queued · network error') }
+    finally { setSending(false) }
   }
-  const sendNew = (to: string, subject: string, body: string) => {
-    const t: Thread = { id: 'n' + Date.now(), subject: subject || '(no subject)', participants: to || '(no recipient)', folder: 'sent', labels: [],
-      unread: false, day: 'today', time: nowHM(), coin: 'brass', initials: ME.initials,
-      messages: [{ id: 'nm' + Date.now(), from: ME.name, fromAddr: ME.addr, to: to, time: nowHM(), coin: 'brass', initials: ME.initials, body }] }
-    setThreads(ts => [t, ...ts]); setComposing(false); setToast('Saved to Sent in demo · not delivered')
+  const sendNew = async (to: string, subject: string, body: string): Promise<boolean> => {
+    if (!live) {
+      const t: Thread = { id: 'n' + Date.now(), subject: subject || '(no subject)', participants: to || '(no recipient)', folder: 'sent', labels: [],
+        unread: false, day: 'today', time: nowHM(), coin: 'brass', initials: ME.initials,
+        messages: [{ id: 'nm' + Date.now(), from: ME.name, fromAddr: ME.addr, to: to, time: nowHM(), coin: 'brass', initials: ME.initials, body }] }
+      setDemoThreads(ts => [t, ...ts]); setComposing(false); setToast('Demo · saved to Sent, not delivered'); return true
+    }
+    try {
+      const item = await queueSend({ to, subject, body })
+      setOutbound(o => [...o, item]); setComposing(false); setToast('Queued · Grok Bot will deliver it'); return true
+    } catch (e) { setToast(e instanceof ApiError ? `Not queued · ${e.message.replace(/_/g, ' ')}` : 'Not queued · network error'); return false }
   }
-  const resetDemo = () => { resetLocal(); location.reload() }
+  const cancel = async (id: string) => {
+    try { const it = await cancelSend(id); setOutbound(o => o.map(x => x.id === id ? it : x)); setToast('Cancelled') }
+    catch (e) { setToast(e instanceof ApiError && e.status === 409 ? 'Too late · already being sent' : 'Could not cancel') }
+  }
+  const startDemo = () => { setDemoMode(true); setDemoThreads(loadDemo()); setMode('demo') }
+  const leave = () => { clearKey(); setDemoMode(false); setApiThreads([]); setOutbound([]); setSelId(null); setMode('connect') }
+  const doResetDemo = () => { resetDemo(); setDemoThreads(loadDemo()) }
   const title = label ? LABELS.find(l => l.id === label)!.name : FOLDERS.find(f => f.id === folder)!.name
-  const replyTo = sel ? ([...sel.messages].reverse().find(m => m.fromAddr !== ME.addr)?.from ?? sel.participants) : ''
+  const replyTo = sel ? (lastInbound(sel)?.from ?? sel.participants) : ''
 
   /* ---------- pieces ---------- */
   const rail = (
@@ -132,7 +200,12 @@ export default function App() {
           </button>))}
       </nav>
       <div className="acct"><Coin coin="brass" initials="AT" size={34} /><div style={{ minWidth: 0 }}><b>{ME.name}</b><small className="trunc"><i />{ME.addr}</small></div></div>
-      <div className="demo">{source === 'sample' ? <>Sample data · v1 <button onClick={resetDemo}>Reset</button></> : 'Live API'}</div>
+      {live ? <div className="demo live">
+          <span className="ls"><i className={refreshing ? 'spin' : ''} />Live · {syncedAt ? `synced ${ago(syncedAt)}` : 'awaiting first sync'}</span>
+          {queuedCount > 0 && <span className="lq">{queuedCount} waiting to send</span>}
+          <span><button onClick={() => refresh()}>Refresh</button> · <button onClick={leave}>Disconnect</button></span>
+        </div>
+        : <div className="demo">Sample data · <button onClick={doResetDemo}>Reset</button> · <button onClick={leave}>Connect</button></div>}
     </aside>
   )
 
@@ -204,22 +277,21 @@ export default function App() {
                 <div className="mh"><Coin coin={m.coin} initials={m.initials} size={36} />
                   <div style={{ minWidth: 0 }}><div className="who">{m.from}<small>{m.bot ? 'bot reply' : m.fromAddr}</small></div><div className="to trunc">to {m.to}</div></div>
                   <div className="mt">{m.time}</div></div>
+                {m.status && <div className="ostat"><span className={`plate ${STATUS[m.status].cls}`}>{STATUS[m.status].label}</span><span className="oh">{m.error || STATUS[m.status].hint}</span>
+                  {m.status === 'queued' && m.outboundId && <button className="chip" onClick={() => cancel(m.outboundId!)}>Cancel</button>}</div>}
                 <div className="txt">{m.body.split('\n').map((line, k) => <p key={k}>{line || '\u00a0'}</p>)}</div>
-                {m.attachment && <button className="att" onClick={() => setToast('Sample attachment · no file in v1')}><i /><Icon n="file" s={15} c="#7A5C2E" />{m.attachment.name}<span>· {m.attachment.size}</span></button>}
+                {m.attachments?.map((a, k) => <span key={k} className="att" title="Attachment files stay in the Grok Bot inbox"><i /><Icon n="file" s={15} c="#7A5C2E" />{a.name}{a.size && <span>· {a.size}</span>}</span>)}
                 {m.bot && i === sel.messages.length - 1 && <div className="quick">
-                  {['Thanks!', 'Sounds good'].map(x => <button key={x} className="chip" onClick={() => setReply(x)}>{x}</button>)}
-                  <button className="chip w" onClick={() => setToast('Summaries arrive with the live API')}>✦ Summarise</button></div>}
+                  {['Thanks!', 'Sounds good'].map(x => <button key={x} className="chip" onClick={() => setReply(x)}>{x}</button>)}</div>}
               </div></article>))}
           </div>
         </div>
         <form className="rpz bezel" onSubmit={e => { e.preventDefault(); sendReply() }}><div className="reply">
           <div className="ta"><Icon n="reply" s={14} c="#B08D57" w={2.4} />Reply to <span className="chip patina">{replyTo}</span>{wide && <> from <b>{ME.addr}</b></>}</div>
           <div className="rrow">
-            <button type="button" className="knob steel" aria-label="Attach" onClick={() => setToast('Attachments arrive with the live API')}><Icon n="attach" s={15} /></button>
             <textarea value={reply} onChange={e => setReply(e.target.value)} placeholder={`Reply to ${replyTo}…`} rows={1}
               onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendReply() } }} />
-            {wide && <button type="button" className="chip ai" onClick={() => setReply(r => r || 'Thanks — received loud and clear on my side too.')}><Icon n="spark" s={13} c="#D4AF37" />Draft with Grok Bot</button>}
-            <button type="submit" className={wide ? 'chip send brass' : 'sendknob brass'} disabled={!reply.trim()} aria-label="Send">{wide ? <><Icon n="sent" s={14} w={2.4} />Send</> : <Icon n="up" s={16} w={2.6} />}</button>
+            <button type="submit" className={wide ? 'chip send brass' : 'sendknob brass'} disabled={!reply.trim() || sending} aria-label="Send">{wide ? <><Icon n="sent" s={14} w={2.4} />Send</> : <Icon n="up" s={16} w={2.6} />}</button>
           </div>
         </div></form>
       </div>
@@ -227,6 +299,8 @@ export default function App() {
   ) : (
     <section className="rbz bezel"><div className="reader empty-reader"><div className="medal">G</div><p>Select a conversation</p><small>{ME.addr}</small></div></section>
   )
+
+  if (mode === 'connect' || mode === 'loading') return <Connect loading={mode === 'loading' || refreshing} error={connectErr} onConnect={k => refresh(k)} onDemo={startDemo} />
 
   return (
     <div className={`app ${wide ? 'wide' : 'narrow'} view-${mobileView}`}>
@@ -239,33 +313,76 @@ export default function App() {
         {(wide || mobileView === 'list') && list}
         {(wide || mobileView === 'thread') && reader}
       </div>
-      {composing && <Compose onClose={() => setComposing(false)} onSend={sendNew} wide={wide} />}
+      {composing && <Compose onClose={() => setComposing(false)} onSend={sendNew} wide={wide} live={live} />}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   )
 }
 
-function Compose({ onClose, onSend, wide }: { onClose: () => void; onSend: (to: string, s: string, b: string) => void; wide: boolean }) {
+function Compose({ onClose, onSend, wide, live }: { onClose: () => void; onSend: (to: string, s: string, b: string) => Promise<boolean>; wide: boolean; live: boolean }) {
   const [to, setTo] = useState('')
   const [subject, setSubject] = useState('')
   const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const ok = /^\s*[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+\s*([,;]\s*[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+\s*)*$/.test(to) && !!body.trim()
+  const submit = async () => { if (!ok || busy) return; setBusy(true); try { await onSend(to, subject, body) } finally { setBusy(false) } }
   return (
     <div className="cwrap" onClick={onClose}>
-      <form className={`sheetb bezel ${wide ? 'win' : ''}`} onClick={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); onSend(to, subject, body) }}>
+      <form className={`sheetb bezel ${wide ? 'win' : ''}`} onClick={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); submit() }}>
         <div className="sheet parch">
           {!wide && <div className="grab" />}
           <div className="bar"><button type="button" className="x" onClick={onClose}>Cancel</button><h2>New message</h2>
-            <span className="sendw"><button type="submit" className="chip brass sendc" disabled={!to.trim() && !body.trim()}><Icon n="sent" s={14} w={2.4} />Send</button></span></div>
+            <span className="sendw"><button type="submit" className="chip brass sendc" disabled={!ok || busy}><Icon n="sent" s={14} w={2.4} />{busy ? 'Queuing…' : 'Send'}</button></span></div>
           <div className="f"><span className="k">FROM</span><span className="chip lock"><Icon n="lock" s={12} c="#EAF3EC" w={2.6} />{ME.addr}</span></div>
-          <label className="f"><span className="k">TO</span><input value={to} onChange={e => setTo(e.target.value)} placeholder="name@example.com" autoFocus={wide} inputMode="email" /><span className="cc">Cc · Bcc</span></label>
+          <label className="f"><span className="k">TO</span><input value={to} onChange={e => setTo(e.target.value)} placeholder="name@example.com" autoFocus={wide} inputMode="email" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label>
           <label className="f"><span className="k">SUBJECT</span><input value={subject} onChange={e => setSubject(e.target.value)} placeholder="Subject" style={{ fontWeight: 650 }} /></label>
-          <textarea className="cbody" value={body} onChange={e => setBody(e.target.value)} placeholder="Write your message…" />
-          <div className="sig">— Alexander · sent from Grok Bot Mail</div>
+          <textarea className="cbody" value={body} onChange={e => setBody(e.target.value)} placeholder="Write your message…"
+            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() } }} />
           <div className="tb">
-            <span className="t steel"><Icon n="attach" s={16} /></span><span className="t steel"><Icon n="image" s={16} /></span><span className="t steel"><Icon n="bold" s={16} w={2.4} /></span>
-            <button type="button" className="chip polish brass" onClick={() => setBody(b => b ? b.trim() + '\n\nBest,\nAlexander' : 'Hi —\n\n')}><Icon n="spark" s={13} c="#3A2810" />Polish with Grok Bot</button>
+            <span className="tbn">Plain text · separate recipients with commas</span>
+            <button type="button" className="chip polish brass" onClick={() => setBody(b => b.trim() ? b.trim() + '\n\nBest,\nAlexander' : 'Hi —\n\n')}><Icon n="spark" s={13} c="#3A2810" />Add sign-off</button>
           </div>
-          <p className="note">v1 demo: Send saves to Sent on this device. No mail is delivered.</p>
+          <p className="note">{live ? 'Queued, then sent from your Grok Bot address when your agent drains the queue. Status shows in Sent.' : 'Demo mode: saved on this device only. Nothing is delivered.'}</p>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+const STATUS: Record<OutboundStatus, { label: string; cls: string; hint: string }> = {
+  queued: { label: 'QUEUED', cls: 'outline', hint: 'Waiting for Grok Bot to send' },
+  sending: { label: 'SENDING', cls: 'brass', hint: 'Grok Bot is sending this now' },
+  sent: { label: 'SENT', cls: 'patina', hint: 'Delivered from ' + ME.addr },
+  failed: { label: 'FAILED', cls: 'rust', hint: 'Not delivered' },
+  cancelled: { label: 'CANCELLED', cls: 'outline', hint: 'Cancelled before sending' },
+}
+
+function ago(iso: string) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`
+  return timeLabel(iso, true)
+}
+
+function Connect({ loading, error, onConnect, onDemo }: { loading: boolean; error: string | null; onConnect: (k: string) => void; onDemo: () => void }) {
+  const [k, setK] = useState('')
+  return (
+    <div className="app connect">
+      <div className="bg" />
+      <form className="cnb bezel" onSubmit={e => { e.preventDefault(); if (k.trim()) onConnect(k.trim()) }}>
+        <div className="cn parch">
+          <div className="medal">G</div>
+          <h1 className="goldtxt">Grok Bot Mail</h1>
+          <p className="cna">{ME.addr}</p>
+          {loading && !k ? <p className="cnh">Opening your mailbox…</p> : <>
+            <label className="cnk"><span>ACCESS KEY</span>
+              <input type="password" value={k} onChange={e => setK(e.target.value)} placeholder="Paste your access key" autoFocus autoComplete="current-password" /></label>
+            {error && <p className="cne" role="alert">{error}</p>}
+            <button type="submit" className="chip brass cnc" disabled={!k.trim() || loading}>{loading ? 'Connecting…' : 'Open mailbox'}</button>
+            <p className="cnh">Ask your Grok Bot agent for the mailbox access key (<b>BOTMAIL_APP_KEY</b>). It is saved on this device only.</p>
+            <button type="button" className="cnd" onClick={onDemo}>Explore with sample data</button>
+          </>}
         </div>
       </form>
     </div>

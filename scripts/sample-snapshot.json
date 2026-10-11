@@ -1,0 +1,27 @@
+{
+  "mode": "merge",
+  "threads": [
+    {
+      "id": "sample-hello",
+      "subject": "test hello",
+      "labels": ["bots"],
+      "messages": [
+        { "id": "sample-hello-1", "from": "Alexander T <at@example.com>", "to": "alexandertr@mail.grokbot.com",
+          "date": "2026-10-11T20:49:00Z", "body": "hello — testing the new Grok Bot address 👋" },
+        { "id": "sample-hello-2", "from": "Ok Bot <okbot@example.com>", "to": "alexandertr@mail.grokbot.com", "bot": true,
+          "date": "2026-10-11T20:52:00Z",
+          "body": "Ok! Loud and clear. This is a SAMPLE thread posted to /api/sync to prove the pipe works.\n\nOnce the real sync runs, your Grok Bot mail replaces this.",
+          "attachments": [{ "name": "delivery-check.txt", "size": "1 KB" }] }
+      ]
+    },
+    {
+      "id": "sample-field",
+      "subject": "Saturday field run",
+      "labels": ["field"],
+      "messages": [
+        { "id": "sample-field-1", "from": "Mina Okafor <mina@example.com>", "to": "alexandertr@mail.grokbot.com",
+          "date": "2026-10-11T19:14:00Z", "body": "Drone batteries are charged and the forecast looks clear. Meet at the north gate at 8?" }
+      ]
+    }
+  ]
+}

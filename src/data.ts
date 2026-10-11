@@ -1,6 +1,6 @@
-// v1 sample data. Every thread here is mock content baked into the build.
-// To wire a real backend later, set VITE_MAIL_API to an endpoint returning
-// { threads: Thread[] } (see src/mailSource.ts). No API keys live in this app.
+// UI view-model types + the offline "sample data" used only in Demo mode.
+// Live mode maps the API contract (shared/types.ts) into these types in src/mailSource.ts.
+import type { OutboundStatus } from '../shared/types'
 
 export type Coin = 'brass' | 'gold' | 'bronze' | 'steel' | 'patina'
 export type Folder = 'inbox' | 'starred' | 'sent' | 'drafts' | 'archive' | 'trash'
@@ -16,7 +16,11 @@ export interface Message {
   initials: string
   bot?: boolean
   body: string
-  attachment?: { name: string; size: string }
+  attachments?: { name: string; size?: string }[]
+  /** Set on messages that came from the outbound queue (not yet mirrored back from Grok Bot). */
+  status?: OutboundStatus
+  outboundId?: string
+  error?: string
 }
 
 export interface Thread {
@@ -33,6 +37,8 @@ export interface Thread {
   initials: string
   bot?: boolean
   messages: Message[]
+  /** epoch ms of newest message (live mode sort key) */
+  ts?: number
 }
 
 export const ME = { name: 'Alexander T', addr: 'alexandertr@mail.grokbot.com', initials: 'AT' }
@@ -46,7 +52,7 @@ export const SAMPLE_THREADS: Thread[] = [
         body: 'hello — testing the new Grok Bot address 👋' },
       { id: 'm2', from: 'Ok Bot', fromAddr: 'okbot@example.com', to: ME.addr, time: '21:52', coin: 'patina', initials: 'OK', bot: true,
         body: 'Ok! Loud and clear. Your Grok Bot inbox is live — mail sent to alexandertr@mail.grokbot.com lands here, and replies go out from the same address.\n\nNothing else to do. Reply to this thread any time to test a round trip.',
-        attachment: { name: 'delivery-check.txt', size: '1 KB' } },
+        attachments: [{ name: 'delivery-check.txt', size: '1 KB' }] },
     ],
   },
   {
