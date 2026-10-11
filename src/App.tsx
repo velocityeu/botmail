@@ -106,7 +106,12 @@ export default function App() {
     window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k)
   }, [])
 
-  const inFolder = (t: Thread, f: Folder) => f === 'starred' ? !!t.starred && t.folder !== 'trash' : t.folder === f
+  // Sent is a view, not a home folder (Gmail-style): any non-trashed thread with a message from me
+  // (synced or still in the outbound queue) shows there, as well as threads whose folder is 'sent'.
+  const inFolder = (t: Thread, f: Folder) =>
+    f === 'starred' ? !!t.starred && t.folder !== 'trash'
+    : f === 'sent' ? t.folder === 'sent' || (t.folder !== 'trash' && t.messages.some(m => m.fromAddr === ME.addr || !!m.outboundId))
+    : t.folder === f
   const visible = useMemo(() => threads.filter(t => {
     if (label ? !(t.labels.includes(label) && t.folder !== 'trash') : !inFolder(t, folder)) return false
     if (seg === 'unread' && !t.unread) return false
@@ -118,6 +123,12 @@ export default function App() {
     return true
   }), [threads, folder, label, seg, q])
   const sel = threads.find(t => t.id === selId) || null
+  // Keep the reader bound to the list being viewed: on folder/label switch, if the open thread is not in
+  // the new list, open the first one (wide) or clear the reader, instead of leaving a stale thread up.
+  useEffect(() => {
+    if (selId && visible.some(t => t.id === selId)) return
+    setSelId(wide ? visible[0]?.id ?? null : null); setReply('')
+  }, [folder, label]) // eslint-disable-line react-hooks/exhaustive-deps
   const unreadCount = threads.filter(t => t.folder === 'inbox' && t.unread).length
   const queuedCount = outbound.filter(o => o.status === 'queued' || o.status === 'sending').length
   const count = (f: Folder) => f === 'inbox' ? unreadCount : f === 'drafts' ? threads.filter(t => t.folder === 'drafts').length : f === 'sent' && live ? queuedCount : 0
@@ -268,7 +279,7 @@ export default function App() {
           <button className="knob steel" onClick={() => moveSel('trash', 'Moved to Trash')} aria-label="Delete"><Icon n="trash" s={14} /></button>
           {wide && <span className="clock">{longClock}</span>}
         </div>
-        <div className="rscroll">
+        <div className="rscroll" key={sel.id}>
           <div className="rsub"><h2>{sel.subject}</h2>
             <div className="meta"><span className="plate brass">{sel.folder.toUpperCase()}</span>{sel.bot && <span className="plate patina">BOT REPLY</span>}<span className="plate outline">{sel.messages.length} MESSAGE{sel.messages.length > 1 ? 'S' : ''}</span></div></div>
           <div className="msgs">
