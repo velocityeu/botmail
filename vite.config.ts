@@ -14,7 +14,7 @@ function devApi(): Plugin {
     [/^\/api\/threads\/[^/]+$/, '/api/threads/[id].ts'],
     [/^\/api\/outbound\/?$/, '/api/outbound/index.ts'],
     [/^\/api\/outbound\/[^/]+$/, '/api/outbound/[id].ts'],
-    [/^\/api\/(sync-request|sync|send|health)\/?$/, '/api/$1.ts'],
+    [/^\/api\/(sync-request|wake-sync|sync|send|health)\/?$/, '/api/$1.ts'],
   ]
   return {
     name: 'botmail-dev-api',

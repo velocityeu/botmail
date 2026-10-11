@@ -70,10 +70,12 @@ export interface SyncRequest {
   startedAt?: string | null
   completedAt?: string | null
   error?: string
-  /** 'ack' = CoS called POST /api/sync-request {status}; 'sync' = auto-closed by a POST /api/sync snapshot. */
-  completedBy?: 'ack' | 'sync'
+  /** 'ack' = CoS called POST /api/sync-request {status}; 'sync' = legacy auto-close (no longer happens); 'force' = manual cleanup. */
+  completedBy?: 'ack' | 'sync' | 'force'
   /** Number of times Sync was pressed while this request was still open. */
   presses?: number
+  /** When CoS pushed POST /api/sync?source=cos-pull for this request (a real inbox pull). Required before 'done'. */
+  pulledAt?: string
   /** Last time /api/wake-sync successfully POSTed the Cursor automation webhook for this request. */
   wokeAt?: string
   /** Number of successful webhook wakes for this request. */

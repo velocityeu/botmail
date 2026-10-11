@@ -32,7 +32,9 @@ export async function POST(req: Request) {
     const r = await fetch(url, {
       method: 'POST', signal: ac.signal,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify({ source: 'botmail-sync-button', requestId: cur.id }),
+      // The webhook-started routine run has no Grok Bot mail tools; the PARENT CoS must do the pull on this wake.
+      body: JSON.stringify({ source: 'botmail-sync-button', requestId: cur.id, action: 'pull-and-flush',
+        note: 'AT tapped Sync. Parent CoS (with SearchEmailThreads/ReadEmailThread/SendEmail) must pull the inbox, POST /api/sync?source=cos-pull, flush the outbound queue, then sync-done.' }),
     })
     status = r.status
   } catch (e) {

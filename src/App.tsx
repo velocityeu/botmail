@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ME, type Folder, type Label, type Message, type Thread } from './data'
 import type { ApiThread, OutboundItem, OutboundStatus, SyncRequest } from '../shared/types'
 import {
-  ApiError, buildThreads, cancelSend, clearKey, fetchLive, fetchSyncRequest, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
+  ApiError, buildThreads, cancelSend, clearKey, fetchLive, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
   queueSend, requestSync, wakeSync, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
 } from './mailSource'
 import { Icon } from './icons'
@@ -96,89 +96,61 @@ export default function App() {
     document.addEventListener('visibilitychange', tick)
     return () => { clearInterval(i); document.removeEventListener('visibilitychange', tick) }
   }, [live, refresh])
-  // Sync button. The spinner is driven ONLY by local state for the current press (syncPhase), never by
-  // the server's request status seen on a background poll, so it can never spin indefinitely.
-  // After POST /api/sync-request we poll GET /api/sync-request every 3 s and stop as soon as the request
-  // is done/failed, or the first successful poll reports pending=false, or a fresh syncedAt lands; then
-  // reload threads. A hard 90 s timeout always stops the spinner and shows "Requested · tap Reload".
-  const SYNC_POLL_MS = 3000, SYNC_TIMEOUT_MS = 90_000
-  const [syncPhase, setSyncPhase] = useState<'idle' | 'watching' | 'timeout'>('idle')
-  const [syncWatch, setSyncWatch] = useState<{ n: number; id: string | null; syncedAt: string | null } | null>(null)
-  // Wake state for the current press: the server proxy (/api/wake-sync) POSTs the Cursor automation webhook.
-  const [wake, setWake] = useState<'idle' | 'waking' | 'woken' | 'failed'>('idle')
+  // Sync button = "wake Grok Bot", not "wait for Grok Bot".
+  // Press: POST /api/sync-request (records the request) then POST /api/wake-sync (server fires the CoS webhook).
+  // The spinner only covers those two calls (each hard-capped at 15 s by api()); it NEVER waits for CoS to finish,
+  // because there is no reliable signal that the parent agent woke and pulled. Afterwards the line reads
+  // "… · tap Reload" (no spinner) and a quiet background refresh of /api/threads runs every 10 s for 3 min; it flips
+  // to "Last synced …" as soon as CoS completes the request or fresh mail (new syncedAt) lands.
+  // Reload always re-reads /api/threads + /api/outbound immediately.
+  const SYNC_POLL_MS = 10_000, SYNC_WATCH_MS = 180_000
+  const [syncPhase, setSyncPhase] = useState<'idle' | 'waking' | 'requested'>('idle')
+  const [wake, setWake] = useState<'idle' | 'woken' | 'failed'>('idle')
+  const syncBase = useRef<{ id: string | null; syncedAt: string | null; at: number } | null>(null)
+  // Leave the 'requested' state the moment CoS really finished (done/failed for this request) or new data landed.
   useEffect(() => {
-    if (!live || !syncWatch) return
-    let stop = false, inFlight = false
-    const finish = (toast?: string) => {
-      if (stop) return
-      stop = true; clearInterval(i); clearTimeout(t)
-      setSyncPhase('idle'); setSyncWatch(null)
-      if (toast) setToast(toast)
+    const b = syncBase.current
+    if (syncPhase !== 'requested' || !b) return
+    const mine = syncReq && syncReq.id === b.id
+    if (mine && syncReq!.status === 'done') { setSyncPhase('idle'); syncBase.current = null; setToast('Synced') }
+    else if (mine && syncReq!.status === 'failed') { setSyncPhase('idle'); syncBase.current = null; setToast(`Sync failed${syncReq!.error ? ' · ' + syncReq!.error : ''}`) }
+    else if (syncedAt && syncedAt !== b.syncedAt) { setSyncPhase('idle'); syncBase.current = null; setToast('Synced · new data') }
+  }, [syncPhase, syncedAt, syncReq])
+  // Quiet background refresh while a request is open (no spinner; stops after SYNC_WATCH_MS).
+  useEffect(() => {
+    if (!live || syncPhase !== 'requested') return
+    const i = setInterval(() => {
+      const b = syncBase.current
+      if (!b || Date.now() - b.at > SYNC_WATCH_MS) { clearInterval(i); return }
       refresh(undefined, true)
-    }
-    const tick = async () => {
-      if (stop || inFlight) return
-      inFlight = true
-      try {
-        const r = await fetchSyncRequest()
-        if (stop) return
-        setSyncReq(r.request)
-        const st = r.request.status
-        const fresh = !!r.syncedAt && r.syncedAt !== syncWatch.syncedAt
-        if (st === 'done' || (fresh && st !== 'failed')) finish('Synced')
-        else if (st === 'failed') finish(`Sync failed${r.request.error ? ' · ' + r.request.error : ''}`)
-        else if (!r.pending) finish()
-      } catch { /* keep polling until the hard timeout */ }
-      finally { inFlight = false }
-    }
-    const i = setInterval(tick, SYNC_POLL_MS)
-    const t = setTimeout(() => {
-      if (stop) return
-      stop = true; clearInterval(i)
-      setSyncPhase('timeout'); setSyncWatch(null)
-    }, SYNC_TIMEOUT_MS)
-    tick()
-    return () => { stop = true; clearInterval(i); clearTimeout(t) }
-  }, [live, syncWatch, refresh])
+    }, SYNC_POLL_MS)
+    return () => clearInterval(i)
+  }, [live, syncPhase, refresh])
   const doSync = async () => {
-    if (!live || requesting || syncPhase === 'watching') return
-    setRequesting(true)
+    if (!live || requesting || syncPhase === 'waking') return
+    setRequesting(true); setSyncPhase('waking'); setWake('idle')
     try {
       const r = await requestSync()
       setSyncReq(r.request)
-      setSyncPhase('watching')
-      setSyncWatch({ n: Date.now(), id: r.request.id, syncedAt: r.syncedAt })
-      setToast('Sync requested · waking Grok Bot')
-      // Fire-and-forget: the request is already recorded, so a wake failure never blocks the Sync flow.
-      setWake('waking')
-      wakeSync().then(w => setWake(w.woke || w.reason === 'recently_woken' ? 'woken' : 'idle'), () => setWake('failed'))
-    } catch (e) { setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error') }
-    finally { setRequesting(false) }
+      syncBase.current = { id: r.request.id, syncedAt: r.syncedAt, at: Date.now() }
+      let w: 'woken' | 'failed' = 'failed'
+      try { const x = await wakeSync(); w = x.woke || x.reason === 'recently_woken' ? 'woken' : 'failed' } catch { w = 'failed' }
+      setWake(w); setSyncPhase('requested')
+      setToast(w === 'woken' ? 'Grok Bot woken · mail arrives shortly, tap Reload' : 'Sync requested · wake failed, Grok Bot picks it up on its next run')
+    } catch (e) {
+      setSyncPhase('idle'); syncBase.current = null
+      setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error')
+    } finally { setRequesting(false) }
   }
-  // Clear the 'Requested · tap Reload' state as soon as any poll shows the request finished or fresh mail landed.
-  const timeoutAt = useRef<string | null>(null)
-  useEffect(() => {
-    if (syncPhase !== 'timeout') { timeoutAt.current = null; return }
-    if (timeoutAt.current === null) { timeoutAt.current = syncedAt ?? ''; return }
-    if (syncReq?.status === 'done' || syncReq?.status === 'failed' || (syncedAt ?? '') !== timeoutAt.current) setSyncPhase('idle')
-  }, [syncPhase, syncedAt, syncReq])
-  // Reload never waits for CoS: it always re-reads /api/threads + /api/outbound right now.
-  // Any in-flight Sync watch keeps polling in the background and finishes on its own.
-  const reload = () => {
-    if (syncPhase === 'timeout') setSyncPhase('idle')
-    refresh().then(ok => setToast(ok ? 'Reloaded' : 'Reload failed · could not reach the mail API'))
-  }
-  const syncBusy = requesting || syncPhase === 'watching'
-  const syncLine = requesting ? 'Requesting…'
-    : syncPhase === 'watching' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing'
-      : wake === 'waking' ? 'Requested · waking Grok Bot'
-      : wake === 'woken' ? 'Grok Bot woken · waiting'
-      : wake === 'failed' ? 'Requested · waiting for Grok Bot'
-      : 'Waiting for Grok Bot')
-    : syncPhase === 'timeout' ? 'Requested · tap Reload'
+  const reload = () => { refresh().then(ok => setToast(ok ? 'Reloaded' : 'Reload failed · could not reach the mail API')) }
+  const syncBusy = requesting || syncPhase === 'waking'
+  const syncLine = syncPhase === 'waking' ? 'Waking Grok Bot…'
+    : syncPhase === 'requested' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing · tap Reload'
+      : wake === 'woken' ? 'Grok Bot woken · tap Reload'
+      : 'Requested · tap Reload')
     : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
     : syncedAt ? `Last synced ${ago(syncedAt)}${syncReq && (syncReq.status === 'pending' || syncReq.status === 'running') ? ' · sync requested' : ''}` : 'Idle · awaiting first sync'
-  const syncTitle = syncBusy ? 'Sync requested; Grok Bot syncs mail and sends queued replies' : 'Ask Grok Bot to sync mail and send queued replies now'
+  const syncTitle = syncBusy ? 'Waking Grok Bot to sync mail and send queued replies' : 'Wake Grok Bot to sync mail and send queued replies now'
 
   useEffect(() => { if (wide && !selId && threads[0]) setSelId(threads.find(t => t.folder === 'inbox')?.id ?? null) }, [threads.length]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (mode === 'demo' && demoThreads.length) saveDemo(demoThreads) }, [mode, demoThreads])
@@ -300,7 +272,7 @@ export default function App() {
       {live ? <div className="demo live">
           <div className="syncbox">
             <button className={`syncb steel ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={syncBusy} title={syncTitle} aria-live="polite">
-              <span className="rv" /><Icon n="sync" s={15} w={2.4} /><b>{syncBusy ? 'Syncing…' : 'Sync'}</b><span className="rv" /></button>
+              <span className="rv" /><Icon n="sync" s={15} w={2.4} /><b>{syncBusy ? 'Waking…' : 'Sync'}</b><span className="rv" /></button>
             <span className="ls"><i className={syncBusy || refreshing ? 'spin' : ''} />{syncLine}</span>
           </div>
           {queuedCount > 0 && <span className="lq">{queuedCount} waiting to send</span>}
@@ -317,7 +289,7 @@ export default function App() {
           <div className="lt">
             {!wide && <button className="knob steel" onClick={() => setRailOpen(true)} aria-label="Mailboxes"><Icon n="sidebar" s={15} /></button>}
             <h1>{title}</h1>{!label && folder === 'inbox' && unreadCount > 0 && <span className="plate brass n">{unreadCount} NEW</span>}
-            {!wide && live && <button className={`knob steel synck ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={syncBusy} title={`${syncTitle} · ${syncLine}`} aria-label={syncBusy ? 'Syncing' : 'Sync'}><Icon n="sync" s={15} w={2.4} /></button>}
+            {!wide && live && <button className={`knob steel synck ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={syncBusy} title={`${syncTitle} · ${syncLine}`} aria-label={syncBusy ? 'Waking Grok Bot' : 'Sync'}><Icon n="sync" s={15} w={2.4} /></button>}
             {wide ? <div className="seg">{(['all', 'unread', 'bots'] as Seg[]).map(s => <button key={s} className={seg === s ? 'on brass' : ''} onClick={() => setSeg(s)}>{s === 'all' ? 'All' : s === 'unread' ? 'Unread' : 'Bots'}</button>)}</div>
               : <button className="compose-pill brass" onClick={() => setComposing(true)}><Icon n="compose" s={15} />Compose</button>}
           </div>

@@ -4,13 +4,16 @@
 //   BOTMAIL_SYNC_SECRET=... node scripts/botmail.mjs status
 //   node scripts/botmail.mjs sync  snapshot.json      # or "-" / stdin
 //   node scripts/botmail.mjs sync  snapshot.json --replace
+//   node scripts/botmail.mjs sync  - --pull           # REAL inbox pull just done by CoS -> /api/sync?source=cos-pull
+//                                                     # (records pulledAt on the open Sync request; required before sync-done)
 //   node scripts/botmail.mjs queue                    # list queued outbound (JSON)
 //   node scripts/botmail.mjs ack <id> sending
 //   node scripts/botmail.mjs ack <id> sent   --message-id <grokMessageId> [--thread-id <grokThreadId>]
 //   node scripts/botmail.mjs ack <id> failed --error "reason"
 //   node scripts/botmail.mjs sync-request             # Sync-button state: {request, pending, syncedAt}
 //   node scripts/botmail.mjs sync-claim               # mark the pending request running (UI: Syncing…)
-//   node scripts/botmail.mjs sync-done                # mark it done (UI: Last synced …)
+//   node scripts/botmail.mjs sync-done                # mark it done (409 pull_required unless a --pull sync happened)
+//   node scripts/botmail.mjs sync-done --force        # manual cleanup only (e.g. cancelling a probe request)
 //   node scripts/botmail.mjs sync-fail --error "reason"
 //
 // Env: BOTMAIL_URL (default https://botmail.velocitypulse.io)
@@ -42,14 +45,14 @@ else if (cmd === 'sync') {
   const raw = JSON.parse(await readIn(args.find(a => !a.startsWith('--'))))
   const payload = Array.isArray(raw) ? { threads: raw } : raw
   if (args.includes('--replace')) payload.mode = 'replace'
-  out = await call('/api/sync', { method: 'POST', body: JSON.stringify(payload) })
+  out = await call(args.includes('--pull') ? '/api/sync?source=cos-pull' : '/api/sync', { method: 'POST', body: JSON.stringify(payload) })
 } else if (cmd === 'queue') out = await call('/api/outbound?status=queued')
 else if (cmd === 'ack') {
   const [id, status] = args
   out = await call(`/api/outbound/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ status, messageId: opt('--message-id'), threadId: opt('--thread-id'), error: opt('--error') }) })
 } else if (cmd === 'sync-request') out = await call('/api/sync-request')
 else if (cmd === 'sync-claim') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'running' }) })
-else if (cmd === 'sync-done') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'done' }) })
+else if (cmd === 'sync-done') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'done', force: args.includes('--force') || undefined }) })
 else if (cmd === 'sync-fail') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'failed', error: opt('--error') }) })
-else { console.error('usage: status | sync <file|-> [--replace] | queue | ack <id> <sending|sent|failed|queued> [--message-id X] [--thread-id X] [--error X] | sync-request | sync-claim | sync-done | sync-fail [--error X]'); process.exit(2) }
+else { console.error('usage: status | sync <file|-> [--replace] [--pull] | queue | ack <id> <sending|sent|failed|queued> [--message-id X] [--thread-id X] [--error X] | sync-request | sync-claim | sync-done [--force] | sync-fail [--error X]'); process.exit(2) }
 console.log(JSON.stringify(out, null, 2))

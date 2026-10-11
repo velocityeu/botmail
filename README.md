@@ -46,41 +46,47 @@ in the private Blob store `botmail-store` (lhr1). The last write wins, which is 
 
 ## Sync button
 
-The metal **Sync** plate in the sidebar (and the round sync knob in the list header on phones) is visible whenever the
-app is connected. Pressing it calls `POST /api/sync-request`, which writes `botmail/sync-request.json`
-`{id, status: "pending", requestedAt, requestedBy, presses}`. The button then shows **Syncing…** and the app polls
-`GET /api/sync-request` every 4 s for about 2 min. When the request turns `done` (or `failed`) it reloads mail and shows
-**Last synced …** (or the error). If nobody picks it up within 2 min it shows "Requested … · waiting for Grok Bot" and
-falls back to the normal 45 s poll.
+**Sync = wake Grok Bot.** Tapping Sync does two quick calls and then stops spinning:
 
-Bot Mail cannot run a sync by itself (only the agent has the Grok Bot mail tools), so the button is a *request* to CoS.
+1. `POST /api/sync-request` records a pending request (a second tap while open only bumps `presses`).
+2. `POST /api/wake-sync` (server-side proxy, token never in the bundle) POSTs the Cursor automation webhook
+   (`BOTMAIL_SYNC_WEBHOOK_URL`, `Authorization: Bearer $BOTMAIL_SYNC_WEBHOOK_TOKEN`, body
+   `{"source":"botmail-sync-button","requestId":…,"action":"pull-and-flush"}`). Throttled to one wake / 60 s / request.
 
-**Waking CoS.** Right after the request is recorded the app calls `POST /api/wake-sync` (fire-and-forget). That
-server-side proxy POSTs the Cursor automation webhook (`BOTMAIL_SYNC_WEBHOOK_URL`, `Authorization: Bearer
-$BOTMAIL_SYNC_WEBHOOK_TOKEN`, body `{"source":"botmail-sync-button","requestId":…}`), which starts the CoS automation
-immediately; CoS then sees the pending request and runs the routine below. The token lives only in server env (never
-`VITE_`, never in the bundle); browser → api2.cursor.sh would be CORS-blocked anyway. Wakes are throttled to one per
-60 s per open request (`wokeAt`/`wakes` on the request). The UI shows "Requested · waking Grok Bot" → "Grok Bot woken ·
-waiting" while polling. A failed wake does not cancel the request; the scheduled CoS run still honours it.
+The UI shows **Waking Grok Bot…** only while those two calls run (each hard-capped at 15 s), then **Grok Bot woken ·
+tap Reload** (or **Requested · tap Reload** if the wake failed). It never spins waiting for CoS, because there is no
+reliable signal that the parent agent woke. For 3 min it quietly re-reads `/api/threads` every 10 s and flips to
+**Last synced …** as soon as CoS acks `done`/`failed` for this request or a new `syncedAt` lands.
 
-**Reload** always re-reads `/api/threads` + `/api/outbound` immediately; it never waits for CoS.
+**Reload** always re-reads `/api/threads` + `/api/outbound` immediately.
 
-### CoS: honour the button (add this to the Bot Mail sync + flush routine)
+### Who does the pull (important)
 
-At the **start of every run** of the CoS Bot Mail sync+flush routine, and whenever it wakes:
+Bot Mail cannot pull by itself, and **neither can the webhook-started routine run**: that child run has no
+`SearchEmailThreads` / `ReadEmailThread` / `SendEmail`. The webhook is only a doorbell. The **parent CoS agent**
+(which holds the Grok Bot mail tools) must handle every `[webhook]` wake of `bot-mail-sync-webhook` by doing the pull
+itself, as below. The routine prompt must say so.
 
-1. `node scripts/botmail.mjs status` → if `syncRequested` is `true` (equivalently `sync-request` → `pending: true`),
-   AT pressed Sync: **run now**, do not wait for the next scheduled slot.
-2. `node scripts/botmail.mjs sync-claim` → status `running` (UI keeps showing Syncing…).
-3. Run the normal routine: pull Grok Bot mail → `POST /api/sync`, then drain the outbound queue (`queue` / `ack`),
-   then re-sync the threads you sent on.
-4. `node scripts/botmail.mjs sync-done` (or `sync-fail --error "<short reason>"`). The UI flips to Last synced.
+### Completion rules (server-enforced)
 
-Use a short-interval check (e.g. every 1–2 min, just `status`, cheap) so a press is honoured within the UI's 2-minute
-window; the full sync+flush only runs when `syncRequested` is true or the regular slot is due. A routine that does not
-know about the button still clears an unclaimed request on its next `POST /api/sync`, but it will not flush the queue
-early, so claiming + `sync-done` is preferred. A `running` request older than 15 min is treated as abandoned and the
-next press re-opens it. Full runbook: [scripts/sync-from-stdin.md](scripts/sync-from-stdin.md) §0.
+- `POST /api/sync` never completes a Sync request. An empty, unflagged `POST /api/sync` is a no-op (does not bump
+  `syncedAt`).
+- `POST /api/sync?source=cos-pull` (helper: `sync - --pull`) means "CoS just pulled the inbox with the mail tools". It
+  bumps `syncedAt` and records `pulledAt` on the open request (status → running).
+- `POST /api/sync-request {"status":"done"}` returns **409 `pull_required`** unless `pulledAt` is set for this request.
+  `{"status":"done","force":true}` (helper `sync-done --force`) is for manual cleanup only (`completedBy: "force"`).
+
+### CoS: on every wake (scheduled or `[webhook]`)
+
+1. `node scripts/botmail.mjs status`: if `syncRequested` is true, AT tapped Sync, so run now.
+2. `node scripts/botmail.mjs sync-claim` (status → running).
+3. Pull: `SearchEmailThreads` + `ReadEmailThread` → `node scripts/botmail.mjs sync - --pull` (even if nothing is new:
+   send `{"threads":[]}` with `--pull`).
+4. Flush: `queue` → `SendEmail` each → `ack <id> sent --message-id …` (or `failed`), then re-sync touched threads with `--pull`.
+5. `node scripts/botmail.mjs sync-done` (or `sync-fail --error "<short reason>"`).
+
+A `pending`/`running` request untouched for 15 min is treated as abandoned; the next tap re-opens it. Full runbook:
+[scripts/sync-from-stdin.md](scripts/sync-from-stdin.md) §0.
 
 ## Env vars (Vercel project `botmail`)
 

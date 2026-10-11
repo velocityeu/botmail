@@ -20,25 +20,27 @@ export BOTMAIL_SECRETS_FILE=/workspace/botmail/.env.botmail-secrets   # helper r
 node scripts/botmail.mjs status
 ```
 
-## 0. Every run: check for a Sync-button request FIRST
+## 0. Every run (scheduled OR `[webhook]` wake): honour a Sync-button request FIRST
 
-AT can press **Sync** in the app. That records a pending request; the routine must honour it immediately.
+AT taps **Sync** → the app records a pending request and fires the `bot-mail-sync-webhook` automation webhook.
+**The webhook-started child run has no mail tools and cannot pull.** The parent CoS (this agent, with
+`SearchEmailThreads` / `ReadEmailThread` / `SendEmail`) must do the pull on every wake.
 
 ```bash
-node scripts/botmail.mjs status        # "syncRequested": true  -> AT pressed Sync, run steps 1 + 2 now
-node scripts/botmail.mjs sync-request  # full detail: {request: {status, requestedAt, presses}, pending, syncedAt}
+node scripts/botmail.mjs status        # "syncRequested": true  -> AT tapped Sync, run now
 ```
 
-When `syncRequested` / `pending` is true:
+When `syncRequested` is true:
 
-1. `node scripts/botmail.mjs sync-claim`        (status → running; the app shows Syncing…)
-2. Run step 1 (receive) and step 2 (drain the outbound queue), then re-sync touched threads.
-3. `node scripts/botmail.mjs sync-done`         (app shows Last synced …)
+1. `node scripts/botmail.mjs sync-claim`                      (status → running)
+2. Step 1 (receive), pushing with **`--pull`**: `node scripts/botmail.mjs sync - --pull`
+   (records `pulledAt`; send `{"threads":[]}` with `--pull` if nothing is new)
+3. Step 2 (drain the outbound queue with SendEmail + ack), then re-sync touched threads with `--pull`.
+4. `node scripts/botmail.mjs sync-done`                       (409 `pull_required` if step 2 was skipped)
    On error: `node scripts/botmail.mjs sync-fail --error "<short reason, no secrets>"`
 
-The app polls for ~2 min after a press, so check `status` on a short interval (1–2 min) and do the full run only when
-a request is pending or the regular slot is due. An unclaimed `pending` request is also closed automatically by the
-next `POST /api/sync`. Raw HTTP: `GET /api/sync-request`, `POST /api/sync-request {"status":"running|done|failed","error"?}`
+Snapshots never auto-complete a request any more, and an empty unflagged `sync` is a no-op. `sync-done --force` is
+for manual cleanup only. Raw HTTP: `POST /api/sync?source=cos-pull`, `POST /api/sync-request {"status":"running|done|failed","error"?,"force"?}`
 with the sync secret.
 
 ## 0a. Smoke test once with SAMPLE data, then remove it
@@ -57,7 +59,7 @@ node scripts/botmail.mjs sync scripts/sample-snapshot.json     # adds 2 threads 
 4. Build JSON in the shape below and pipe it in:
 
 ```bash
-node scripts/botmail.mjs sync - <<'JSON'
+node scripts/botmail.mjs sync - --pull <<'JSON'
 { "threads": [
   { "id": "<thread_id from SearchEmailThreads>",
     "subject": "<subject>",
