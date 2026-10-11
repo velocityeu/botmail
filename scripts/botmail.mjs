@@ -8,6 +8,10 @@
 //   node scripts/botmail.mjs ack <id> sending
 //   node scripts/botmail.mjs ack <id> sent   --message-id <grokMessageId> [--thread-id <grokThreadId>]
 //   node scripts/botmail.mjs ack <id> failed --error "reason"
+//   node scripts/botmail.mjs sync-request             # Sync-button state: {request, pending, syncedAt}
+//   node scripts/botmail.mjs sync-claim               # mark the pending request running (UI: Syncing…)
+//   node scripts/botmail.mjs sync-done                # mark it done (UI: Last synced …)
+//   node scripts/botmail.mjs sync-fail --error "reason"
 //
 // Env: BOTMAIL_URL (default https://botmail.velocitypulse.io)
 //      BOTMAIL_SYNC_SECRET (falls back to BOTMAIL_SYNC_SECRET= line in $BOTMAIL_SECRETS_FILE)
@@ -43,5 +47,9 @@ else if (cmd === 'sync') {
 else if (cmd === 'ack') {
   const [id, status] = args
   out = await call(`/api/outbound/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ status, messageId: opt('--message-id'), threadId: opt('--thread-id'), error: opt('--error') }) })
-} else { console.error('usage: status | sync <file|-> [--replace] | queue | ack <id> <sending|sent|failed|queued> [--message-id X] [--thread-id X] [--error X]'); process.exit(2) }
+} else if (cmd === 'sync-request') out = await call('/api/sync-request')
+else if (cmd === 'sync-claim') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'running' }) })
+else if (cmd === 'sync-done') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'done' }) })
+else if (cmd === 'sync-fail') out = await call('/api/sync-request', { method: 'POST', body: JSON.stringify({ status: 'failed', error: opt('--error') }) })
+else { console.error('usage: status | sync <file|-> [--replace] | queue | ack <id> <sending|sent|failed|queued> [--message-id X] [--thread-id X] [--error X] | sync-request | sync-claim | sync-done | sync-fail [--error X]'); process.exit(2) }
 console.log(JSON.stringify(out, null, 2))

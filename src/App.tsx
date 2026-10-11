@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ME, type Folder, type Label, type Message, type Thread } from './data'
-import type { ApiThread, OutboundItem, OutboundStatus } from '../shared/types'
+import type { ApiThread, OutboundItem, OutboundStatus, SyncRequest } from '../shared/types'
 import {
-  ApiError, buildThreads, cancelSend, clearKey, fetchLive, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
-  queueSend, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
+  ApiError, buildThreads, cancelSend, clearKey, fetchLive, fetchSyncRequest, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
+  queueSend, requestSync, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
 } from './mailSource'
 import { Icon } from './icons'
 
@@ -64,6 +64,9 @@ export default function App() {
   const [sending, setSending] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [railOpen, setRailOpen] = useState(false)
+  const [syncReq, setSyncReq] = useState<SyncRequest | null>(null)
+  const [watchUntil, setWatchUntil] = useState(0)
+  const [requesting, setRequesting] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   const live = mode === 'live'
 
@@ -74,7 +77,7 @@ export default function App() {
     try {
       const d = await fetchLive(key)
       if (key) setKey(key)
-      setApiThreads(d.threads); setOutbound(d.outbound); setSyncedAt(d.syncedAt)
+      setApiThreads(d.threads); setOutbound(d.outbound); setSyncedAt(d.syncedAt); if (d.syncRequest) setSyncReq(d.syncRequest)
       setMode('live'); setDemoMode(false); setConnectErr(null)
       return true
     } catch (e) {
@@ -94,6 +97,48 @@ export default function App() {
     document.addEventListener('visibilitychange', tick)
     return () => { clearInterval(i); document.removeEventListener('visibilitychange', tick) }
   }, [live, refresh])
+  // Sync button: after a press, poll the request every 4 s for ~2 min; reload mail when CoS reports done
+  // (or when a fresh syncedAt lands), then fall back to the normal 45 s poll.
+  const syncedAtRef = useRef(syncedAt); syncedAtRef.current = syncedAt
+  useEffect(() => {
+    if (!live || !watchUntil) return
+    let stop = false
+    const tick = async () => {
+      if (stop) return
+      if (Date.now() > watchUntil) { setWatchUntil(0); refresh(undefined, true); return }
+      try {
+        const r = await fetchSyncRequest()
+        if (stop) return
+        setSyncReq(r.request)
+        if (r.syncedAt && r.syncedAt !== syncedAtRef.current) refresh(undefined, true)
+        if (!r.pending) {
+          setWatchUntil(0); refresh(undefined, true)
+          if (r.request.status === 'done') setToast('Synced')
+          else if (r.request.status === 'failed') setToast(`Sync failed${r.request.error ? ' · ' + r.request.error : ''}`)
+        }
+      } catch { /* keep polling */ }
+    }
+    const i = setInterval(tick, 4000)
+    return () => { stop = true; clearInterval(i) }
+  }, [live, watchUntil, refresh])
+  const doSync = async () => {
+    if (!live || requesting) return
+    setRequesting(true)
+    try {
+      const r = await requestSync()
+      setSyncReq(r.request); setWatchUntil(Date.now() + 120_000)
+      setToast('Sync requested · Grok Bot will pick it up')
+    } catch (e) { setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error') }
+    finally { setRequesting(false) }
+  }
+  const syncBusy = requesting || syncReq?.status === 'pending' || syncReq?.status === 'running'
+  const syncLine = requesting ? 'Requesting…'
+    : syncReq?.status === 'running' ? 'Grok Bot is syncing'
+    : syncReq?.status === 'pending' ? (watchUntil ? 'Waiting for Grok Bot' : `Requested ${ago(syncReq.requestedAt!)} · waiting for Grok Bot`)
+    : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
+    : syncedAt ? `Last synced ${ago(syncedAt)}` : 'Idle · awaiting first sync'
+  const syncTitle = syncBusy ? 'Sync requested; Grok Bot syncs mail and sends queued replies' : 'Ask Grok Bot to sync mail and send queued replies now'
+
   useEffect(() => { if (wide && !selId && threads[0]) setSelId(threads.find(t => t.folder === 'inbox')?.id ?? null) }, [threads.length]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (mode === 'demo' && demoThreads.length) saveDemo(demoThreads) }, [mode, demoThreads])
   useEffect(() => { saveFlags(flags) }, [flags])
@@ -212,9 +257,13 @@ export default function App() {
       </nav>
       <div className="acct"><Coin coin="brass" initials="AT" size={34} /><div style={{ minWidth: 0 }}><b>{ME.name}</b><small className="trunc"><i />{ME.addr}</small></div></div>
       {live ? <div className="demo live">
-          <span className="ls"><i className={refreshing ? 'spin' : ''} />Live · {syncedAt ? `synced ${ago(syncedAt)}` : 'awaiting first sync'}</span>
+          <div className="syncbox">
+            <button className={`syncb steel ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={requesting} title={syncTitle} aria-live="polite">
+              <span className="rv" /><Icon n="sync" s={15} w={2.4} /><b>{syncBusy ? 'Syncing…' : 'Sync'}</b><span className="rv" /></button>
+            <span className="ls"><i className={syncBusy || refreshing ? 'spin' : ''} />{syncLine}</span>
+          </div>
           {queuedCount > 0 && <span className="lq">{queuedCount} waiting to send</span>}
-          <span><button onClick={() => refresh()}>Refresh</button> · <button onClick={leave}>Disconnect</button></span>
+          <span><button onClick={() => refresh()}>Reload</button> · <button onClick={leave}>Disconnect</button></span>
         </div>
         : <div className="demo">Sample data · <button onClick={doResetDemo}>Reset</button> · <button onClick={leave}>Connect</button></div>}
     </aside>
@@ -227,6 +276,7 @@ export default function App() {
           <div className="lt">
             {!wide && <button className="knob steel" onClick={() => setRailOpen(true)} aria-label="Mailboxes"><Icon n="sidebar" s={15} /></button>}
             <h1>{title}</h1>{!label && folder === 'inbox' && unreadCount > 0 && <span className="plate brass n">{unreadCount} NEW</span>}
+            {!wide && live && <button className={`knob steel synck ${syncBusy ? 'busy' : ''}`} onClick={doSync} disabled={requesting} title={`${syncTitle} · ${syncLine}`} aria-label={syncBusy ? 'Syncing' : 'Sync'}><Icon n="sync" s={15} w={2.4} /></button>}
             {wide ? <div className="seg">{(['all', 'unread', 'bots'] as Seg[]).map(s => <button key={s} className={seg === s ? 'on brass' : ''} onClick={() => setSeg(s)}>{s === 'all' ? 'All' : s === 'unread' ? 'Unread' : 'Bots'}</button>)}</div>
               : <button className="compose-pill brass" onClick={() => setComposing(true)}><Icon n="compose" s={15} />Compose</button>}
           </div>

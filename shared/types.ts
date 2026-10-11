@@ -49,5 +49,36 @@ export interface OutboundItem {
   error?: string
 }
 
-export interface ThreadsResponse { threads: ApiThread[]; syncedAt: string | null; mailbox: string }
+export interface ThreadsResponse { threads: ApiThread[]; syncedAt: string | null; mailbox: string; syncRequest?: SyncRequest; syncPending?: boolean }
 export interface OutboundResponse { items: OutboundItem[] }
+
+/**
+ * "Sync now" request raised from the web app's Sync button (botmail/sync-request.json).
+ * pending  = AT pressed Sync, waiting for CoS
+ * running  = CoS claimed it and is syncing + flushing
+ * done     = CoS finished (completedAt set)
+ * failed   = CoS gave up (error set)
+ * idle     = no request has ever been made
+ */
+export type SyncRequestStatus = 'idle' | 'pending' | 'running' | 'done' | 'failed'
+
+export interface SyncRequest {
+  id: string | null
+  status: SyncRequestStatus
+  requestedAt: string | null
+  requestedBy?: 'app' | 'sync'
+  startedAt?: string | null
+  completedAt?: string | null
+  error?: string
+  /** 'ack' = CoS called POST /api/sync-request {status}; 'sync' = auto-closed by a POST /api/sync snapshot. */
+  completedBy?: 'ack' | 'sync'
+  /** Number of times Sync was pressed while this request was still open. */
+  presses?: number
+}
+
+export interface SyncRequestResponse {
+  request: SyncRequest
+  /** true while status is pending or running */
+  pending: boolean
+  syncedAt: string | null
+}

@@ -1,5 +1,5 @@
 import { ME, SAMPLE_THREADS, type Coin, type Folder, type Label, type Message, type Thread } from './data'
-import type { ApiMessage, ApiThread, OutboundItem, OutboundResponse, ThreadsResponse } from '../shared/types'
+import type { ApiMessage, ApiThread, OutboundItem, OutboundResponse, SyncRequest, SyncRequestResponse, ThreadsResponse } from '../shared/types'
 
 /* ---------------- key + local prefs ---------------- */
 const K_KEY = 'botmail.key'
@@ -33,8 +33,11 @@ export async function fetchLive(key?: string) {
     api<ThreadsResponse>('/api/threads', {}, key),
     api<OutboundResponse>('/api/outbound', {}, key),
   ])
-  return { threads: t.threads, syncedAt: t.syncedAt, outbound: o.items }
+  return { threads: t.threads, syncedAt: t.syncedAt, outbound: o.items, syncRequest: t.syncRequest ?? null }
 }
+export const requestSync = () => api<SyncRequestResponse>('/api/sync-request', { method: 'POST', body: '{}' })
+export const fetchSyncRequest = () => api<SyncRequestResponse>('/api/sync-request')
+export type { SyncRequest }
 export const queueSend = (m: { to: string; subject: string; body: string; replyToMessageId?: string; threadId?: string; cc?: string }) =>
   api<{ item: OutboundItem }>('/api/outbound', { method: 'POST', body: JSON.stringify(m) }).then(r => r.item)
 export const cancelSend = (id: string) =>

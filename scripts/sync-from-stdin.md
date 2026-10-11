@@ -20,7 +20,28 @@ export BOTMAIL_SECRETS_FILE=/workspace/botmail/.env.botmail-secrets   # helper r
 node scripts/botmail.mjs status
 ```
 
-## 0. Smoke test once with SAMPLE data, then remove it
+## 0. Every run: check for a Sync-button request FIRST
+
+AT can press **Sync** in the app. That records a pending request; the routine must honour it immediately.
+
+```bash
+node scripts/botmail.mjs status        # "syncRequested": true  -> AT pressed Sync, run steps 1 + 2 now
+node scripts/botmail.mjs sync-request  # full detail: {request: {status, requestedAt, presses}, pending, syncedAt}
+```
+
+When `syncRequested` / `pending` is true:
+
+1. `node scripts/botmail.mjs sync-claim`        (status → running; the app shows Syncing…)
+2. Run step 1 (receive) and step 2 (drain the outbound queue), then re-sync touched threads.
+3. `node scripts/botmail.mjs sync-done`         (app shows Last synced …)
+   On error: `node scripts/botmail.mjs sync-fail --error "<short reason, no secrets>"`
+
+The app polls for ~2 min after a press, so check `status` on a short interval (1–2 min) and do the full run only when
+a request is pending or the regular slot is due. An unclaimed `pending` request is also closed automatically by the
+next `POST /api/sync`. Raw HTTP: `GET /api/sync-request`, `POST /api/sync-request {"status":"running|done|failed","error"?}`
+with the sync secret.
+
+## 0a. Smoke test once with SAMPLE data, then remove it
 
 ```bash
 node scripts/botmail.mjs sync scripts/sample-snapshot.json     # adds 2 threads with ids sample-*
@@ -90,7 +111,8 @@ enqueue). Whether CoS may send without asking again is up to AT's standing instr
 
 ## 3. Cadence
 
-Run steps 1 and 2 together on a routine (e.g. every 5–15 min) or when AT says "sync mail". The app polls
+Run steps 1 and 2 together on a routine (e.g. every 5–15 min), when AT says "sync mail", or **immediately when
+`status` shows `syncRequested: true`** (AT pressed Sync in the app; see step 0). The app polls
 the API every 45 s and when the tab regains focus, and it shows "synced N min ago" and the queue count.
 
 ## Raw HTTP (no helper)
@@ -99,6 +121,8 @@ the API every 45 s and when the tab regains focus, and it shows "synced N min ag
 Authorization: Bearer $BOTMAIL_SYNC_SECRET
 GET  /api/sync                       status
 POST /api/sync                       {threads, mode?, remove?}
+GET  /api/sync-request                {request, pending, syncedAt}
+POST /api/sync-request                {status: running|done|failed, error?}
 GET  /api/outbound?status=queued     queue
 POST /api/outbound/:id               {status: sending|sent|failed|queued|cancelled, messageId?, threadId?, error?}
 ```

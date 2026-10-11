@@ -1,19 +1,20 @@
 // CoS-only mirror endpoint (BOTMAIL_SYNC_SECRET).
 // POST /api/sync { threads: SnapshotThread[], mode?: 'merge' | 'replace', remove?: string[] }
-// GET  /api/sync -> status { threads, syncedAt, queued }
+// GET  /api/sync -> status { threads, syncedAt, queued, sending, syncRequested, syncRequest }
 import { auth, body, err, json, MAILBOX } from './_lib/http.js'
 import { mergeThread, normThread } from './_lib/normalize.js'
-import { readOutbound, readThreads, writeOutbound, writeThreads } from './_lib/store.js'
+import { isSyncPending, readOutbound, readSyncRequest, readThreads, writeOutbound, writeSyncRequest, writeThreads } from './_lib/store.js'
 import type { ApiThread } from '../shared/types.js'
 
 const MAX_THREADS = 1000
 
 export async function GET(req: Request) {
   const a = auth(req, 'sync'); if (a instanceof Response) return a
-  const [t, o] = await Promise.all([readThreads(), readOutbound()])
+  const [t, o, sr] = await Promise.all([readThreads(), readOutbound(), readSyncRequest()])
   return json({ mailbox: MAILBOX, threads: t.threads.length, syncedAt: t.syncedAt,
     queued: o.items.filter(i => i.status === 'queued').length,
-    sending: o.items.filter(i => i.status === 'sending').length })
+    sending: o.items.filter(i => i.status === 'sending').length,
+    syncRequested: isSyncPending(sr), syncRequest: sr })
 }
 
 export async function POST(req: Request) {
@@ -46,6 +47,14 @@ export async function POST(req: Request) {
   const weekAgo = Date.now() - 7 * 864e5
   const kept = o.items.filter(i => !(i.status === 'sent' && i.messageId && seen.has(i.messageId) && Date.parse(i.updatedAt) < weekAgo))
   if (kept.length !== o.items.length) await writeOutbound({ items: kept })
+
+  // A Sync-button request nobody claimed (still 'pending') is satisfied by any snapshot pushed after it was
+  // raised, so a routine that does not know about the button still clears it. A claimed ('running') request
+  // stays open until CoS acks done/failed via /api/sync-request (it may still be flushing the outbound queue).
+  const sr = await readSyncRequest()
+  if (sr.status === 'pending' && sr.requestedAt && sr.requestedAt <= syncedAt) {
+    await writeSyncRequest({ ...sr, status: 'done', startedAt: sr.startedAt || syncedAt, completedAt: syncedAt, completedBy: 'sync' })
+  }
 
   return json({ ok: true, mode: b.mode === 'replace' ? 'replace' : 'merge', added, updated, rejected, total: threads.length, syncedAt })
 }

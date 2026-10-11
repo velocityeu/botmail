@@ -19,6 +19,7 @@ const P: Record<string, JSX.Element> = {
   file: <><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></>,
   lock: <><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></>,
   sidebar: <><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></>,
+  sync: <><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/></>,
   x: <path d="M6 6l12 12M18 6 6 18"/>,
 }
 export function Icon({ n, s = 16, c = 'currentColor', w = 2.2 }: { n: keyof typeof P | string; s?: number; c?: string; w?: number }) {
