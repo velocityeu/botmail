@@ -74,6 +74,10 @@ export interface SyncRequest {
   completedBy?: 'ack' | 'sync'
   /** Number of times Sync was pressed while this request was still open. */
   presses?: number
+  /** Last time /api/wake-sync successfully POSTed the Cursor automation webhook for this request. */
+  wokeAt?: string
+  /** Number of successful webhook wakes for this request. */
+  wakes?: number
 }
 
 export interface SyncRequestResponse {

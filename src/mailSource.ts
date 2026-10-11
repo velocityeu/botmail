@@ -42,6 +42,9 @@ export async function fetchLive(key?: string) {
   return { threads: t.threads, syncedAt: t.syncedAt, outbound: o.items, syncRequest: t.syncRequest ?? null }
 }
 export const requestSync = () => api<SyncRequestResponse>('/api/sync-request', { method: 'POST', body: '{}' })
+export interface WakeResponse { ok: boolean; woke: boolean; reason?: string; upstreamStatus?: number; wokeAt?: string }
+/** Server-side proxy that POSTs the Cursor automation webhook to wake Grok Bot (CoS). Token never leaves the server. */
+export const wakeSync = () => api<WakeResponse>('/api/wake-sync', { method: 'POST', body: '{}' })
 export const fetchSyncRequest = () => api<SyncRequestResponse>('/api/sync-request')
 export type { SyncRequest }
 export const queueSend = (m: { to: string; subject: string; body: string; replyToMessageId?: string; threadId?: string; cc?: string }) =>

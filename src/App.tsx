@@ -3,7 +3,7 @@ import { ME, type Folder, type Label, type Message, type Thread } from './data'
 import type { ApiThread, OutboundItem, OutboundStatus, SyncRequest } from '../shared/types'
 import {
   ApiError, buildThreads, cancelSend, clearKey, fetchLive, fetchSyncRequest, firstAddr, flagsFrom, getKey, getMode, loadDemo, loadFlags,
-  queueSend, requestSync, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
+  queueSend, requestSync, wakeSync, resetDemo, saveDemo, saveFlags, setDemoMode, setKey, timeLabel, type Flags,
 } from './mailSource'
 import { Icon } from './icons'
 
@@ -104,6 +104,8 @@ export default function App() {
   const SYNC_POLL_MS = 3000, SYNC_TIMEOUT_MS = 90_000
   const [syncPhase, setSyncPhase] = useState<'idle' | 'watching' | 'timeout'>('idle')
   const [syncWatch, setSyncWatch] = useState<{ n: number; id: string | null; syncedAt: string | null } | null>(null)
+  // Wake state for the current press: the server proxy (/api/wake-sync) POSTs the Cursor automation webhook.
+  const [wake, setWake] = useState<'idle' | 'waking' | 'woken' | 'failed'>('idle')
   useEffect(() => {
     if (!live || !syncWatch) return
     let stop = false, inFlight = false
@@ -146,7 +148,10 @@ export default function App() {
       setSyncReq(r.request)
       setSyncPhase('watching')
       setSyncWatch({ n: Date.now(), id: r.request.id, syncedAt: r.syncedAt })
-      setToast('Sync requested · Grok Bot will pick it up')
+      setToast('Sync requested · waking Grok Bot')
+      // Fire-and-forget: the request is already recorded, so a wake failure never blocks the Sync flow.
+      setWake('waking')
+      wakeSync().then(w => setWake(w.woke || w.reason === 'recently_woken' ? 'woken' : 'idle'), () => setWake('failed'))
     } catch (e) { setToast(e instanceof ApiError ? `Sync not requested · ${e.message.replace(/_/g, ' ')}` : 'Sync not requested · network error') }
     finally { setRequesting(false) }
   }
@@ -157,10 +162,19 @@ export default function App() {
     if (timeoutAt.current === null) { timeoutAt.current = syncedAt ?? ''; return }
     if (syncReq?.status === 'done' || syncReq?.status === 'failed' || (syncedAt ?? '') !== timeoutAt.current) setSyncPhase('idle')
   }, [syncPhase, syncedAt, syncReq])
-  const reload = () => { setSyncPhase('idle'); refresh() }
+  // Reload never waits for CoS: it always re-reads /api/threads + /api/outbound right now.
+  // Any in-flight Sync watch keeps polling in the background and finishes on its own.
+  const reload = () => {
+    if (syncPhase === 'timeout') setSyncPhase('idle')
+    refresh().then(ok => setToast(ok ? 'Reloaded' : 'Reload failed · could not reach the mail API'))
+  }
   const syncBusy = requesting || syncPhase === 'watching'
   const syncLine = requesting ? 'Requesting…'
-    : syncPhase === 'watching' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing' : 'Waiting for Grok Bot')
+    : syncPhase === 'watching' ? (syncReq?.status === 'running' ? 'Grok Bot is syncing'
+      : wake === 'waking' ? 'Requested · waking Grok Bot'
+      : wake === 'woken' ? 'Grok Bot woken · waiting'
+      : wake === 'failed' ? 'Requested · waiting for Grok Bot'
+      : 'Waiting for Grok Bot')
     : syncPhase === 'timeout' ? 'Requested · tap Reload'
     : syncReq?.status === 'failed' && syncReq.completedAt && (!syncedAt || syncReq.completedAt > syncedAt) ? `Last sync failed${syncReq.error ? ' · ' + syncReq.error : ''}`
     : syncedAt ? `Last synced ${ago(syncedAt)}${syncReq && (syncReq.status === 'pending' || syncReq.status === 'running') ? ' · sync requested' : ''}` : 'Idle · awaiting first sync'

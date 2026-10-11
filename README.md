@@ -38,6 +38,7 @@ All endpoints take `Authorization: Bearer <key>`. **app** = `BOTMAIL_APP_KEY` (t
 | POST | `/api/sync` | sync | upsert snapshot `{threads, mode?: merge\|replace, remove?}` (also closes an unclaimed `pending` sync request) |
 | GET | `/api/sync-request` | app | `{request, pending, syncedAt}`; `GET /api/threads` also returns `syncRequest` + `syncPending` |
 | POST | `/api/sync-request` | app | Sync button: `{}` opens a request (`status: pending`, `requestedAt`); repeat presses while open bump `presses` |
+| POST | `/api/wake-sync` | app | Server-side POST to the Cursor automation webhook to wake CoS for the open request (throttled 60 s) |
 | POST | `/api/sync-request` | sync | `{status: running\|done\|failed, error?}` CoS claims / completes it |
 
 The contract types live in `shared/types.ts`. Storage: `botmail/threads.json`, `botmail/outbound.json` and `botmail/sync-request.json`
@@ -53,6 +54,16 @@ app is connected. Pressing it calls `POST /api/sync-request`, which writes `botm
 falls back to the normal 45 s poll.
 
 Bot Mail cannot run a sync by itself (only the agent has the Grok Bot mail tools), so the button is a *request* to CoS.
+
+**Waking CoS.** Right after the request is recorded the app calls `POST /api/wake-sync` (fire-and-forget). That
+server-side proxy POSTs the Cursor automation webhook (`BOTMAIL_SYNC_WEBHOOK_URL`, `Authorization: Bearer
+$BOTMAIL_SYNC_WEBHOOK_TOKEN`, body `{"source":"botmail-sync-button","requestId":…}`), which starts the CoS automation
+immediately; CoS then sees the pending request and runs the routine below. The token lives only in server env (never
+`VITE_`, never in the bundle); browser → api2.cursor.sh would be CORS-blocked anyway. Wakes are throttled to one per
+60 s per open request (`wokeAt`/`wakes` on the request). The UI shows "Requested · waking Grok Bot" → "Grok Bot woken ·
+waiting" while polling. A failed wake does not cancel the request; the scheduled CoS run still honours it.
+
+**Reload** always re-reads `/api/threads` + `/api/outbound` immediately; it never waits for CoS.
 
 ### CoS: honour the button (add this to the Bot Mail sync + flush routine)
 
@@ -76,6 +87,7 @@ next press re-opens it. Full runbook: [scripts/sync-from-stdin.md](scripts/sync-
 - `BLOB_READ_WRITE_TOKEN`: set automatically by the linked Blob store
 - `BOTMAIL_APP_KEY`: Production + Preview, sensitive
 - `BOTMAIL_SYNC_SECRET`: Production + Preview, sensitive
+- `BOTMAIL_SYNC_WEBHOOK_URL`, `BOTMAIL_SYNC_WEBHOOK_TOKEN`: Production + Preview, sensitive, server-only (`/api/wake-sync`)
 
 The values are not in git. The box keeps a copy at `/workspace/botmail/.env.botmail-secrets` (chmod 600).
 
